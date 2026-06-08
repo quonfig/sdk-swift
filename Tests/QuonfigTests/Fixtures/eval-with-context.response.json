@@ -1,0 +1,65 @@
+{
+  "evaluations": {
+    "new-checkout": {
+      "value": {
+        "type": "bool",
+        "value": true
+      },
+      "configId": "cfg_01HZX9K2QJ4RM8N3VP7T6WAB",
+      "configType": "feature_flag",
+      "valueType": "bool",
+      "reason": "STATIC"
+    },
+    "button-color": {
+      "value": {
+        "type": "string",
+        "value": "green"
+      },
+      "configId": "cfg_01HZX9K3RM5SN9P4WQ8U7XBC",
+      "configType": "config",
+      "valueType": "string",
+      "reason": "TARGETING_MATCH",
+      "ruleIndex": 0
+    },
+    "rate-limit": {
+      "value": {
+        "type": "int",
+        "value": 250
+      },
+      "configId": "cfg_01HZX9K4SN6TP0Q5XR9V8YCD",
+      "configType": "config",
+      "valueType": "int",
+      "reason": "STATIC"
+    },
+    "checkout-experiment": {
+      "value": {
+        "type": "string",
+        "value": "variant-b"
+      },
+      "configId": "cfg_01HZX9K5TP7UQ1R6YS0W9ZDE",
+      "configType": "feature_flag",
+      "valueType": "weighted_values",
+      "reason": "SPLIT",
+      "ruleIndex": 1,
+      "weightedValueIndex": 2
+    },
+    "pricing": {
+      "value": {
+        "type": "json",
+        "value": {
+          "currency": "USD",
+          "tiers": [9, 29, 99],
+          "trial": true
+        }
+      },
+      "configId": "cfg_01HZX9K6UQ8VR2S7ZT1X0AEF",
+      "configType": "config",
+      "valueType": "json",
+      "reason": "STATIC"
+    }
+  },
+  "meta": {
+    "version": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4",
+    "environment": "production"
+  }
+}

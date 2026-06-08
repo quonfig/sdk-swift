@@ -1,0 +1,48 @@
+{
+  "instanceHash": "b7e6f0c2-8a14-4f3d-9c5e-1d2a3b4c5d6e",
+  "clientName": "swift",
+  "clientVersion": "0.0.1",
+  "events": [
+    {
+      "summaries": {
+        "start": 1749340800000,
+        "end": 1749340830000,
+        "summaries": [
+          {
+            "key": "new-checkout",
+            "type": "feature_flag",
+            "counters": [
+              {
+                "configRowIndex": 0,
+                "conditionalValueIndex": 0,
+                "configId": "cfg_01HZX9K2QJ4RM8N3VP7T6WAB",
+                "reason": "STATIC",
+                "selectedValue": {
+                  "bool": true
+                },
+                "count": 17
+              }
+            ]
+          },
+          {
+            "key": "button-color",
+            "type": "config",
+            "counters": [
+              {
+                "configRowIndex": 1,
+                "conditionalValueIndex": 0,
+                "configId": "cfg_01HZX9K3RM5SN9P4WQ8U7XBC",
+                "reason": "TARGETING_MATCH",
+                "ruleIndex": 0,
+                "selectedValue": {
+                  "string": "green"
+                },
+                "count": 4
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

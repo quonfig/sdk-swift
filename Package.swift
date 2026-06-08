@@ -24,6 +24,9 @@ let package = Package(
         .testTarget(
             name: "QuonfigTests",
             dependencies: ["Quonfig"],
+            resources: [
+                .copy("Fixtures"),
+            ],
             swiftSettings: [
                 .enableExperimentalFeature("StrictConcurrency=complete"),
             ]

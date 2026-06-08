@@ -1,0 +1,31 @@
+{
+  "description": "Two-step conditional-GET exchange against GET /api/v2/configs/eval-with-context/{base64url(ctx)}?collectContextMode=PERIODIC_EXAMPLE. Step 1 is the initial 200 that mints the ETag; step 2 replays it via If-None-Match and gets a 304 with an empty body. SOURCE-DERIVED from api-delivery/internal/serve/eval_context.go (ServeHTTP + evalContextETag) and sdk-javascript/src/loader.ts.",
+  "request": {
+    "method": "GET",
+    "path": "/api/v2/configs/eval-with-context/eyJ1c2VyIjp7ImtleSI6InVfMTIzIiwiZW1haWwiOiJhQGIuY29tIn19?collectContextMode=PERIODIC_EXAMPLE",
+    "headers": {
+      "Authorization": "Basic dTpxZl9ja19wcm9kdWN0aW9uX2V4YW1wbGU="
+    }
+  },
+  "initial200": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json",
+      "ETag": "9f8b3c1d2e4a5b6c7d8e9f0a1b2c3d4e"
+    },
+    "bodyFixture": "eval-with-context.response.json"
+  },
+  "conditionalRequest": {
+    "method": "GET",
+    "path": "/api/v2/configs/eval-with-context/eyJ1c2VyIjp7ImtleSI6InVfMTIzIiwiZW1haWwiOiJhQGIuY29tIn19?collectContextMode=PERIODIC_EXAMPLE",
+    "headers": {
+      "Authorization": "Basic dTpxZl9ja19wcm9kdWN0aW9uX2V4YW1wbGU=",
+      "If-None-Match": "9f8b3c1d2e4a5b6c7d8e9f0a1b2c3d4e"
+    }
+  },
+  "notModified304": {
+    "status": 304,
+    "headers": {},
+    "body": ""
+  }
+}
