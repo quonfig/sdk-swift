@@ -4,13 +4,13 @@ import XCTest
 @testable import Quonfig
 
 final class AuthTests: XCTestCase {
-    func testBasicAuthUsesUUsernameForClientKey() {
-        // api-delivery/internal/auth/auth.go: frontend key = Basic base64("u:" + key)
+    func testBasicAuthUsesFleetUsername() {
+        // api-delivery ignores the Basic-auth username; all Quonfig SDKs send "1".
         let header = authHeaderValue(sdkKey: "qf_ck_test")
         XCTAssertTrue(header.hasPrefix("Basic "))
         let encoded = String(header.dropFirst("Basic ".count))
         let decoded = String(data: Data(base64Encoded: encoded)!, encoding: .utf8)!
-        XCTAssertEqual(decoded, "u:qf_ck_test")
+        XCTAssertEqual(decoded, "1:qf_ck_test")
     }
 }
 

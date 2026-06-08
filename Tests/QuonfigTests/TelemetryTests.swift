@@ -116,7 +116,7 @@ final class TelemetryTests: XCTestCase {
         XCTAssertEqual(client.requests.count, 1)
         let req = client.requests[0]
         XCTAssertEqual(req.httpMethod, "POST")
-        // HTTP Basic with the "u:" frontend-key username + content type.
+        // HTTP Basic with the fleet "1:" username + content type.
         XCTAssertEqual(req.value(forHTTPHeaderField: "Authorization"), authHeaderValue(sdkKey: "qf_ck_test"))
         XCTAssertEqual(req.value(forHTTPHeaderField: "Content-Type"), "application/json")
         XCTAssertEqual(req.url?.absoluteString, "https://telemetry.quonfig-localhost/api/v1/telemetry/")

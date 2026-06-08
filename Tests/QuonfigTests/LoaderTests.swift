@@ -84,9 +84,9 @@ final class LoaderTests: XCTestCase {
         XCTAssertTrue(urlString.hasSuffix("?collectContextMode=PERIODIC_EXAMPLE"))
         XCTAssertEqual(req.httpMethod, "GET")
 
-        // HTTP Basic with username "u" -> base64("u:" + key). This is how
-        // api-delivery's auth.go classifies a frontend key.
-        let expectedAuth = "Basic " + Data("u:qf_ck_production_example".utf8).base64EncodedString()
+        // HTTP Basic -> base64("1:" + key). api-delivery ignores the username;
+        // all Quonfig SDKs send "1".
+        let expectedAuth = "Basic " + Data("1:qf_ck_production_example".utf8).base64EncodedString()
         XCTAssertEqual(req.value(forHTTPHeaderField: "Authorization"), expectedAuth)
         XCTAssertEqual(req.value(forHTTPHeaderField: "Accept"), "application/json")
         XCTAssertTrue((req.value(forHTTPHeaderField: "User-Agent") ?? "").hasPrefix("Quonfig-Swift/"))

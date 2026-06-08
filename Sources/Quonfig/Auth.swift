@@ -2,17 +2,13 @@ import Foundation
 
 /// HTTP Basic auth header for Quonfig API requests.
 ///
-/// The frontend/client key is sent as `Authorization: Basic base64("u:" + sdkKey)`.
-/// The `"u"` username is how `api-delivery` distinguishes a client key from a
-/// backend key — any non-`"u"` username (e.g. `"authuser"`) is treated as a
-/// backend key. See `api-delivery/internal/auth/auth.go` (`ParseAuthHeader`).
-///
-/// (Note: `sdk-javascript` currently sends `base64("1:" + sdkKey)`; that path
-/// resolves to a *backend* key in `auth.go`. This Apple SDK is a frontend
-/// client, so it uses the canonical `"u"` username per the plan §2.3 and the
-/// server's own switch statement.)
+/// Sent as `Authorization: Basic base64("1:" + sdkKey)`. The Basic-auth
+/// username is ignored by `api-delivery` — authorization is driven entirely by
+/// the SDK key, and frontend vs backend is determined by the stored key record,
+/// not the username (see `api-delivery/internal/auth/auth.go`). All Quonfig SDKs
+/// send `"1"`; we match the fleet for consistency.
 func authHeaderValue(sdkKey: String) -> String {
-    let raw = "u:\(sdkKey)"
+    let raw = "1:\(sdkKey)"
     let encoded = Data(raw.utf8).base64EncodedString()
     return "Basic \(encoded)"
 }
