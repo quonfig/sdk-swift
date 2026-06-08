@@ -185,7 +185,7 @@ public struct EvalEnvelope: Sendable, Equatable, Decodable {
 /// native JSON (object/array/etc.), or string list. We preserve it losslessly so
 /// the typed accessors in `Quonfig` (qfg-2t2d.6+) can coerce on read. Integers
 /// are distinguished from doubles so `int(...)` accessors are exact.
-public enum QuonfigJSONValue: Sendable, Equatable, Decodable {
+public enum QuonfigJSONValue: Sendable, Equatable, Hashable, Decodable {
     case null
     case bool(Bool)
     case int(Int64)
@@ -218,6 +218,22 @@ public enum QuonfigJSONValue: Sendable, Equatable, Decodable {
         } else {
             throw DecodingError.dataCorruptedError(
                 in: c, debugDescription: "Unsupported JSON value")
+        }
+    }
+
+    /// Project the value graph back into a Foundation object graph
+    /// (`NSNull`/`Bool`/`Int64`/`Double`/`String`/`[Any]`/`[String: Any]`) so the
+    /// `json(_:) -> [String: Any]?` accessor can hand callers an idiomatic
+    /// dictionary. `int` widens to `Int` where representable for ergonomics.
+    public var foundationValue: Any {
+        switch self {
+        case .null: return NSNull()
+        case .bool(let b): return b
+        case .int(let i): return Int(exactly: i) ?? i
+        case .double(let d): return d
+        case .string(let s): return s
+        case .array(let arr): return arr.map { $0.foundationValue }
+        case .object(let obj): return obj.mapValues { $0.foundationValue }
         }
     }
 }
