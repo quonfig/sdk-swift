@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Quonfig Apple-platform SDK privacy manifest (plan sdk-ios.md §1, §2.10).
+	  Hard App Store gate since 2024-05-01. Wired into Package.swift via
+	  process("Resources/PrivacyInfo.xcprivacy") so it lands in Bundle.module.
+	-->
+
+	<!--
+	  We do NOT track users across apps/sites owned by other companies. Declared
+	  explicitly (Statsig omits this key; Apple wants it present). §1 trap #1.
+	-->
+	<key>NSPrivacyTracking</key>
+	<false/>
+
+	<!--
+	  Intentionally EMPTY. Populating this list broke Flagsmith v3.6.0 for
+	  ATT-declined users (#57) — an empty array is the correct "no tracking
+	  domains" declaration. §1.
+	-->
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+
+	<!--
+	  Data collected/transmitted by the SDK. Context (which may include a user id
+	  and/or device id) is sent to api-delivery ON THE EVAL REQUEST ITSELF (base64
+	  in the request path — §2.3), so we declare it here honestly. This is NOT about
+	  telemetry: the client's only upload is anonymous per-flag read counts (§2.8).
+	  Both linked to identity (the caller supplies them as identifiers) and NOT used
+	  for tracking. Purpose is app functionality (server-side flag evaluation).
+	-->
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeUserID</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeDeviceID</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+	</array>
+
+	<!--
+	  Required-reason APIs. We use UserDefaults for the no-flicker cache
+	  (Persistence.swift), so CA92.1 (access to the app's own defaults) is
+	  mandatory. We do NOT declare FileTimestamp (C617.1): the file cache audit
+	  (Persistence.swift / DefaultsAndFileStore) confirms it never reads
+	  contentModificationDate/stat/attributesOfItem — recency is tracked via a
+	  `savedAt` value written into the record at save time, not read from the
+	  filesystem. §1 trap #3.
+	-->
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
