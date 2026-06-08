@@ -135,6 +135,14 @@ public actor Store {
     /// the lock only protects the read/write tear across threads).
     private let snapshotBox = SnapshotBox()
 
+    /// Lock-guarded exposure recorder, read off-actor from the synchronous
+    /// EXPOSED read path (`resolved(_:logExposure:true)`). The telemetry
+    /// aggregator (qfg-2t2d.8) registers a closure here that fans an exposure to
+    /// the aggregator actor via a detached, non-awaited `Task` — so a read NEVER
+    /// blocks on telemetry (§2.8). `nil` until wired (or when summaries are
+    /// disabled via `Configuration.collectEvaluationSummaries`).
+    private let exposureBox = ExposureRecorderBox()
+
     /// Active subscribers, keyed by token id so cancellation is O(1).
     private var subscribers: [UInt64: @Sendable () -> Void] = [:]
     private var nextSubscriberID: UInt64 = 0
@@ -397,9 +405,33 @@ public actor Store {
     private nonisolated func resolved(_ key: String, logExposure: Bool = true) -> Resolved? {
         let snap = snapshotBox.value
         guard snap.ready, let ev = snap.evaluations[key] else { return nil }
-        // qfg-2t2d.8 hook: when logExposure, hand `ev`/`key` to the aggregator.
-        _ = logExposure
-        return Resolved(evaluation: ev, coerced: coerce(ev.value))
+        let coerced = coerce(ev.value)
+        // qfg-2t2d.8: an EXPOSED read records one exposure. The recorder fans to
+        // the aggregator actor via a detached Task, so this never blocks the read.
+        if logExposure, let recorder = exposureBox.recorder {
+            let reason = ev.reason ?? .static
+            let details = EvaluationDetails(
+                value: coerced,
+                reason: reason,
+                ruleIndex: ev.ruleIndex,
+                weightedValueIndex: ev.weightedValueIndex,
+                variant: buildVariant(
+                    reason: reason, ruleIndex: ev.ruleIndex,
+                    weightedValueIndex: ev.weightedValueIndex),
+                configId: ev.configId,
+                configType: ev.configType)
+            recorder(key, details)
+        }
+        return Resolved(evaluation: ev, coerced: coerced)
+    }
+
+    /// Wire the exposure recorder. The telemetry aggregator (qfg-2t2d.8) calls
+    /// this with a closure that forwards each EXPOSED read to its `record(...)`.
+    /// Passing `nil` disables exposure recording (e.g.
+    /// `collectEvaluationSummaries == false`). Actor-isolated so the write is
+    /// serialized; the read side is the lock-guarded `exposureBox`.
+    public func setExposureRecorder(_ recorder: (@Sendable (String, EvaluationDetails) -> Void)?) {
+        exposureBox.recorder = recorder
     }
 
     /// Coerce a wire `{ type, value }` into a native `QuonfigValue`, mirroring
@@ -493,6 +525,26 @@ private final class SnapshotBox: @unchecked Sendable {
         set {
             lock.lock(); defer { lock.unlock() }
             _value = newValue
+        }
+    }
+}
+
+/// Lock-guarded holder for the exposure recorder closure. Written from inside the
+/// `Store` actor, read off-actor from the synchronous read path. `@unchecked
+/// Sendable` because the `NSLock` makes the closure read/write tear-free and the
+/// stored closure is itself `@Sendable`.
+private final class ExposureRecorderBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _recorder: (@Sendable (String, EvaluationDetails) -> Void)?
+
+    var recorder: (@Sendable (String, EvaluationDetails) -> Void)? {
+        get {
+            lock.lock(); defer { lock.unlock() }
+            return _recorder
+        }
+        set {
+            lock.lock(); defer { lock.unlock() }
+            _recorder = newValue
         }
     }
 }
