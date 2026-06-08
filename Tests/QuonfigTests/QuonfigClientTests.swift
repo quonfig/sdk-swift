@@ -4,7 +4,7 @@ import XCTest
 @testable import Quonfig
 
 #if canImport(FoundationNetworking)
-import FoundationNetworking
+    import FoundationNetworking
 #endif
 
 /// End-to-end behaviour of the public `Quonfig` facade (§2.4): `initialize` →
@@ -57,8 +57,9 @@ final class QuonfigClientTests: XCTestCase {
     }
 
     private func fixtureData(_ name: String) throws -> Data {
-        guard let url = Bundle.module.url(
-            forResource: name, withExtension: nil, subdirectory: "Fixtures")
+        guard
+            let url = Bundle.module.url(
+                forResource: name, withExtension: nil, subdirectory: "Fixtures")
         else {
             XCTFail("missing fixture: Fixtures/\(name)")
             throw CocoaError(.fileNoSuchFile)
@@ -127,8 +128,9 @@ final class QuonfigClientTests: XCTestCase {
         // green -> red) under a NEW ETag so the loader applies it.
         var mutated = try evalBody()
         if var obj = try JSONSerialization.jsonObject(with: mutated) as? [String: Any],
-           var evals = obj["evaluations"] as? [String: Any],
-           var bc = evals["button-color"] as? [String: Any] {
+            var evals = obj["evaluations"] as? [String: Any],
+            var bc = evals["button-color"] as? [String: Any]
+        {
             bc["value"] = ["type": "string", "value": "red"]
             evals["button-color"] = bc
             obj["evaluations"] = evals
@@ -159,8 +161,9 @@ final class QuonfigClientTests: XCTestCase {
         // Second response (the updateContext refetch) returns rate-limit = 999.
         var mutated = try evalBody()
         if var obj = try JSONSerialization.jsonObject(with: mutated) as? [String: Any],
-           var evals = obj["evaluations"] as? [String: Any],
-           var rl = evals["rate-limit"] as? [String: Any] {
+            var evals = obj["evaluations"] as? [String: Any],
+            var rl = evals["rate-limit"] as? [String: Any]
+        {
             rl["value"] = ["type": "int", "value": 999]
             evals["rate-limit"] = rl
             obj["evaluations"] = evals

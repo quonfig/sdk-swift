@@ -1,9 +1,9 @@
 import Foundation
 
 #if canImport(FoundationNetworking)
-// Linux-Swift splits URLSession into FoundationNetworking (plan §2.10: cheap
-// insurance for Swift-on-server test harnesses — Flagsmith #21).
-import FoundationNetworking
+    // Linux-Swift splits URLSession into FoundationNetworking (plan §2.10: cheap
+    // insurance for Swift-on-server test harnesses — Flagsmith #21).
+    import FoundationNetworking
 #endif
 
 /// The slice of `URLSession` the loader depends on, behind a protocol so tests
@@ -18,24 +18,24 @@ public protocol HTTPClient: Sendable {
 
 extension URLSession: HTTPClient {
     #if canImport(FoundationNetworking)
-    // On Linux the async `data(for:)` is not always available; bridge the
-    // completion-handler API so the same protocol method works everywhere.
-    public func data(for request: URLRequest) async throws -> (Data, URLResponse) {
-        try await withCheckedThrowingContinuation { continuation in
-            let task = self.dataTask(with: request) { data, response, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
+        // On Linux the async `data(for:)` is not always available; bridge the
+        // completion-handler API so the same protocol method works everywhere.
+        public func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+            try await withCheckedThrowingContinuation { continuation in
+                let task = self.dataTask(with: request) { data, response, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                        return
+                    }
+                    guard let data, let response else {
+                        continuation.resume(throwing: QuonfigLoaderError.noResponse)
+                        return
+                    }
+                    continuation.resume(returning: (data, response))
                 }
-                guard let data, let response else {
-                    continuation.resume(throwing: QuonfigLoaderError.noResponse)
-                    return
-                }
-                continuation.resume(returning: (data, response))
+                task.resume()
             }
-            task.resume()
         }
-    }
     #endif
 }
 
@@ -177,7 +177,8 @@ public actor Loader {
         // Trim a trailing slash on the base (loader.ts does `.replace(/\/$/, "")`).
         var base = apiURL.absoluteString
         if base.hasSuffix("/") { base.removeLast() }
-        let s = "\(base)/api/v2/configs/eval-with-context/\(encoded)"
+        let s =
+            "\(base)/api/v2/configs/eval-with-context/\(encoded)"
             + "?collectContextMode=\(collectContextMode.rawValue)"
         guard let u = URL(string: s) else {
             throw QuonfigContextError.encodingFailed

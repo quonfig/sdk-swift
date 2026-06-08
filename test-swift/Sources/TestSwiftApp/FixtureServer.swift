@@ -76,9 +76,11 @@ final class FixtureServer: @unchecked Sendable {
             let headEnd = acc.range(of: Data("\r\n\r\n".utf8))
             if headEnd != nil || isComplete || error != nil {
                 let response = self.response(forRequestHead: acc)
-                conn.send(content: response, completion: .contentProcessed { _ in
-                    conn.cancel()
-                })
+                conn.send(
+                    content: response,
+                    completion: .contentProcessed { _ in
+                        conn.cancel()
+                    })
             } else {
                 self.receive(on: conn, buffer: acc)
             }

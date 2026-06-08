@@ -4,7 +4,7 @@ import XCTest
 @testable import Quonfig
 
 #if canImport(FoundationNetworking)
-import FoundationNetworking
+    import FoundationNetworking
 #endif
 
 /// Telemetry: the eval-summary aggregator + uploader (qfg-2t2d.8).
@@ -108,7 +108,8 @@ final class TelemetryTests: XCTestCase {
             queueStore: store)
 
         for _ in 0..<3 {
-            await agg.record(key: "new-checkout", details: details(.bool(true), configType: "feature_flag", configId: "cfg_a"))
+            await agg.record(
+                key: "new-checkout", details: details(.bool(true), configType: "feature_flag", configId: "cfg_a"))
         }
         await agg.flush()
 
@@ -148,9 +149,11 @@ final class TelemetryTests: XCTestCase {
         XCTAssertEqual(obj(.string("green"), "config"), ["string": .string("green")])
         XCTAssertEqual(obj(.int(42), "config"), ["int": .int(42)])
         // string_list massages to { string_list: { values: [...] } } (JS massageSelectedValue).
-        if case .object(let o)? = Optional(SummaryAggregator.selectedValue(for: .stringList(["a", "b"]), configType: "config")),
-           case .object(let inner)? = o["string_list"],
-           case .array(let arr)? = inner["values"] {
+        if case .object(let o)? = Optional(
+            SummaryAggregator.selectedValue(for: .stringList(["a", "b"]), configType: "config")),
+            case .object(let inner)? = o["string_list"],
+            case .array(let arr)? = inner["values"]
+        {
             XCTAssertEqual(arr, [.string("a"), .string("b")])
         } else {
             XCTFail("string_list shape")
@@ -247,12 +250,16 @@ final class TelemetryTests: XCTestCase {
         store.seed = [
             EvaluationSummaries(
                 start: 1, end: 2,
-                summaries: [EvaluationSummary(
-                    key: "restored", type: "feature_flag",
-                    counters: [EvaluationCounter(
-                        configRowIndex: nil, conditionalValueIndex: nil, configId: "c",
-                        reason: "STATIC", ruleIndex: nil, weightedValueIndex: nil,
-                        selectedValue: .object(["bool": .bool(true)]), count: 9)])])
+                summaries: [
+                    EvaluationSummary(
+                        key: "restored", type: "feature_flag",
+                        counters: [
+                            EvaluationCounter(
+                                configRowIndex: nil, conditionalValueIndex: nil, configId: "c",
+                                reason: "STATIC", ruleIndex: nil, weightedValueIndex: nil,
+                                selectedValue: .object(["bool": .bool(true)]), count: 9)
+                        ])
+                ])
         ]
         let agg = SummaryAggregator(
             uploader: makeUploader(client), instanceHash: "ih", queueStore: store)

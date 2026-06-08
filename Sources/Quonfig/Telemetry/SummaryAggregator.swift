@@ -318,7 +318,8 @@ final class TelemetryFileQueueStore: TelemetryQueueStore, @unchecked Sendable {
 
     static func defaultDirectory() -> URL {
         let fm = FileManager.default
-        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        let base =
+            fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? fm.temporaryDirectory
         return base.appendingPathComponent("com.quonfig.sdk", isDirectory: true)
             .appendingPathComponent("telemetry", isDirectory: true)

@@ -17,8 +17,9 @@ import XCTest
 final class ConcurrencyStressTests: XCTestCase {
 
     private func fixtureData(_ name: String) throws -> Data {
-        guard let url = Bundle.module.url(
-            forResource: name, withExtension: nil, subdirectory: "Fixtures")
+        guard
+            let url = Bundle.module.url(
+                forResource: name, withExtension: nil, subdirectory: "Fixtures")
         else {
             XCTFail("missing fixture: Fixtures/\(name)")
             throw CocoaError(.fileNoSuchFile)
@@ -27,8 +28,9 @@ final class ConcurrencyStressTests: XCTestCase {
     }
 
     private func envelope(boolValue: Bool, version: Int) throws -> EvalEnvelope {
-        var root = try JSONSerialization.jsonObject(
-            with: try fixtureData("eval-with-context.response.json")) as! [String: Any]
+        var root =
+            try JSONSerialization.jsonObject(
+                with: try fixtureData("eval-with-context.response.json")) as! [String: Any]
         var evals = root["evaluations"] as! [String: Any]
         var checkout = evals["new-checkout"] as! [String: Any]
         var val = checkout["value"] as! [String: Any]
@@ -84,7 +86,8 @@ final class ConcurrencyStressTests: XCTestCase {
                         _ = store.isEnabled("new-checkout")
                         // button-color is "green" in EVERY applied envelope here,
                         // so a torn read would surface the default instead.
-                        XCTAssertEqual(store.string("button-color", default: "TORN"), "green",
+                        XCTAssertEqual(
+                            store.string("button-color", default: "TORN"), "green",
                             "a torn snapshot read would return the default")
                         _ = store.int("rate-limit", default: -1)
                         _ = store.details("checkout-experiment")

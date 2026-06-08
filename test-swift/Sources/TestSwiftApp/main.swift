@@ -31,9 +31,10 @@ func runDemo() async {
         print("[test-swift] LIVE mode -> \(apiURL.absoluteString)")
     } else {
         // Fixture mode (default): start the in-process server.
-        guard let fixtureURL = Bundle.module.url(
-            forResource: "eval-with-context.response",
-            withExtension: "json", subdirectory: "Fixtures")
+        guard
+            let fixtureURL = Bundle.module.url(
+                forResource: "eval-with-context.response",
+                withExtension: "json", subdirectory: "Fixtures")
         else {
             print("[test-swift] FATAL: missing bundled fixture")
             exit(1)
@@ -62,7 +63,7 @@ func runDemo() async {
         collectEvaluationSummaries: true)
 
     let context = QuonfigContext([
-        "user": ["key": .string("u_123"), "email": .string("a@example.test")],
+        "user": ["key": .string("u_123"), "email": .string("a@example.test")]
     ])
 
     let quonfig: Quonfig
@@ -92,9 +93,10 @@ func runDemo() async {
 
     // updateContext: switch identity and refetch.
     print("[test-swift] updateContext -> u_456")
-    try? await quonfig.updateContext(QuonfigContext([
-        "user": ["key": .string("u_456"), "email": .string("b@example.test")],
-    ]))
+    try? await quonfig.updateContext(
+        QuonfigContext([
+            "user": ["key": .string("u_456"), "email": .string("b@example.test")]
+        ]))
     printFlags(quonfig, label: "after updateContext")
 
     print("[test-swift] subscriber change notifications observed: \(changes.value)")
@@ -109,8 +111,9 @@ func printFlags(_ q: Quonfig, label: String) {
     let color = q.string("button-color", default: "blue")
     let limit = q.int("rate-limit", default: 0)
     let detail = q.details("checkout-experiment")
-    print("[test-swift] [\(label)] new-checkout=\(nc) button-color=\(color) "
-        + "rate-limit=\(limit) checkout-experiment.variant=\(detail.variant)")
+    print(
+        "[test-swift] [\(label)] new-checkout=\(nc) button-color=\(color) "
+            + "rate-limit=\(limit) checkout-experiment.variant=\(detail.variant)")
 }
 
 /// Tiny one-shot async port handoff from the server's `ready` callback to the

@@ -1,8 +1,8 @@
 import Foundation
 
 #if canImport(FoundationNetworking)
-// Linux-Swift splits URLSession into FoundationNetworking (plan §2.10).
-import FoundationNetworking
+    // Linux-Swift splits URLSession into FoundationNetworking (plan §2.10).
+    import FoundationNetworking
 #endif
 
 /// A single per-flag evaluation counter, mirroring

@@ -39,12 +39,13 @@ final class StoreTests: XCTestCase {
 
     func testTypedGettersReturnValues() async {
         let store = Store()
-        await store.apply(envelope([
-            "flag": eval(type: "bool", value: .bool(true)),
-            "name": eval(type: "string", value: .string("blue")),
-            "limit": eval(type: "int", value: .int(100)),
-            "ratio": eval(type: "double", value: .double(0.5)),
-        ]))
+        await store.apply(
+            envelope([
+                "flag": eval(type: "bool", value: .bool(true)),
+                "name": eval(type: "string", value: .string("blue")),
+                "limit": eval(type: "int", value: .int(100)),
+                "ratio": eval(type: "double", value: .double(0.5)),
+            ]))
 
         XCTAssertTrue(store.isEnabled("flag"))
         XCTAssertEqual(store.string("name", default: "x"), "blue")
@@ -54,9 +55,10 @@ final class StoreTests: XCTestCase {
 
     func testGettersFallBackToDefaultOnAbsentOrWrongType() async {
         let store = Store()
-        await store.apply(envelope([
-            "name": eval(type: "string", value: .string("blue")),
-        ]))
+        await store.apply(
+            envelope([
+                "name": eval(type: "string", value: .string("blue"))
+            ]))
 
         // Absent key -> default.
         XCTAssertFalse(store.isEnabled("missing"))
@@ -71,10 +73,11 @@ final class StoreTests: XCTestCase {
 
     func testNumericCoercionLeniency() async {
         let store = Store()
-        await store.apply(envelope([
-            "wholeDouble": eval(type: "double", value: .double(3.0)),
-            "intAsDouble": eval(type: "int", value: .int(5)),
-        ]))
+        await store.apply(
+            envelope([
+                "wholeDouble": eval(type: "double", value: .double(3.0)),
+                "intAsDouble": eval(type: "int", value: .int(5)),
+            ]))
         // Whole double readable as int.
         XCTAssertEqual(store.int("wholeDouble", default: 0), 3)
         // Int widens to double.
@@ -83,14 +86,17 @@ final class StoreTests: XCTestCase {
 
     func testJSONGetter() async {
         let store = Store()
-        await store.apply(envelope([
-            "pricing": eval(type: "json", value: .object([
-                "tier": .string("pro"),
-                "seats": .int(10),
-            ])),
-            "notObject": eval(type: "json", value: .array([.int(1)])),
-            "str": eval(type: "string", value: .string("x")),
-        ]))
+        await store.apply(
+            envelope([
+                "pricing": eval(
+                    type: "json",
+                    value: .object([
+                        "tier": .string("pro"),
+                        "seats": .int(10),
+                    ])),
+                "notObject": eval(type: "json", value: .array([.int(1)])),
+                "str": eval(type: "string", value: .string("x")),
+            ]))
 
         let obj = store.json("pricing")
         XCTAssertEqual(obj?["tier"] as? String, "pro")
@@ -103,9 +109,10 @@ final class StoreTests: XCTestCase {
 
     func testStringListCoercion() async {
         let store = Store()
-        await store.apply(envelope([
-            "hosts": eval(type: "string_list", value: .array([.string("a"), .string("b")])),
-        ]))
+        await store.apply(
+            envelope([
+                "hosts": eval(type: "string_list", value: .array([.string("a"), .string("b")]))
+            ]))
         let d = store.details("hosts")
         XCTAssertEqual(d.value, .stringList(["a", "b"]))
     }
@@ -114,11 +121,12 @@ final class StoreTests: XCTestCase {
 
     func testDetailsReasonsAndVariants() async {
         let store = Store()
-        await store.apply(envelope([
-            "stat": eval(type: "bool", value: .bool(true), reason: .static),
-            "target": eval(type: "bool", value: .bool(true), reason: .targetingMatch, ruleIndex: 2),
-            "split": eval(type: "bool", value: .bool(true), reason: .split, weightedValueIndex: 1),
-        ]))
+        await store.apply(
+            envelope([
+                "stat": eval(type: "bool", value: .bool(true), reason: .static),
+                "target": eval(type: "bool", value: .bool(true), reason: .targetingMatch, ruleIndex: 2),
+                "split": eval(type: "bool", value: .bool(true), reason: .split, weightedValueIndex: 1),
+            ]))
 
         XCTAssertEqual(store.details("stat").reason, .static)
         XCTAssertEqual(store.details("stat").variant, "static")
@@ -136,9 +144,10 @@ final class StoreTests: XCTestCase {
 
     func testDetailsDefaultReasonWhenAbsent() async {
         let store = Store()
-        await store.apply(envelope([
-            "flag": eval(type: "bool", value: .bool(true)),
-        ]))
+        await store.apply(
+            envelope([
+                "flag": eval(type: "bool", value: .bool(true))
+            ]))
         // Missing key -> ERROR reason, default variant (sdk-javascript parity).
         let d = store.details("missing")
         XCTAssertEqual(d.reason, .error)
@@ -157,9 +166,10 @@ final class StoreTests: XCTestCase {
     func testWireReasonAbsentDefaultsToStatic() async {
         let store = Store()
         // reason omitted on the wire -> treated as STATIC in details.
-        await store.apply(envelope([
-            "flag": eval(type: "bool", value: .bool(true), reason: nil),
-        ]))
+        await store.apply(
+            envelope([
+                "flag": eval(type: "bool", value: .bool(true), reason: nil)
+            ]))
         XCTAssertEqual(store.details("flag").reason, .static)
     }
 
@@ -248,7 +258,8 @@ final class StoreTests: XCTestCase {
 
     func testMultipleSubscribersAllFire() async {
         let store = Store()
-        let c1 = Counter(), c2 = Counter()
+        let c1 = Counter()
+        let c2 = Counter()
         let t1 = await store.subscribe { c1.increment() }
         let t2 = await store.subscribe { c2.increment() }
         await store.apply(envelope(["a": eval(type: "int", value: .int(1))]))
@@ -291,12 +302,13 @@ final class StoreTests: XCTestCase {
 
     func testExposureDecoupledVariantsReturnSameValues() async {
         let store = Store()
-        await store.apply(envelope([
-            "flag": eval(type: "bool", value: .bool(true)),
-            "name": eval(type: "string", value: .string("blue")),
-            "limit": eval(type: "int", value: .int(9)),
-            "ratio": eval(type: "double", value: .double(2.5)),
-        ]))
+        await store.apply(
+            envelope([
+                "flag": eval(type: "bool", value: .bool(true)),
+                "name": eval(type: "string", value: .string("blue")),
+                "limit": eval(type: "int", value: .int(9)),
+                "ratio": eval(type: "double", value: .double(2.5)),
+            ]))
         // The …logExposure:false variant returns identical values today; the
         // only difference (suppressed exposure) wires in at qfg-2t2d.8.
         XCTAssertEqual(store.isEnabled("flag", logExposure: false), store.isEnabled("flag"))

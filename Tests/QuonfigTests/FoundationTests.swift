@@ -27,8 +27,9 @@ final class UserAgentTests: XCTestCase {
 final class URLsTests: XCTestCase {
     func testDeriveFromDomain() {
         let urls = QuonfigURLs.fromDomain("quonfig.com")
-        XCTAssertEqual(urls.apiURLs.map(\.absoluteString),
-                       ["https://primary.quonfig.com", "https://secondary.quonfig.com"])
+        XCTAssertEqual(
+            urls.apiURLs.map(\.absoluteString),
+            ["https://primary.quonfig.com", "https://secondary.quonfig.com"])
         XCTAssertEqual(urls.telemetryURL.absoluteString, "https://telemetry.quonfig.com")
     }
 
@@ -112,8 +113,9 @@ final class ContextEncodingTests: XCTestCase {
         // 0xFB,0xFF,0xBF -> base64 "+/+/" family; ensure they are remapped.
         let data = Data([0xFB, 0xFF, 0xBF, 0xFE, 0xFF])
         let stdB64 = data.base64EncodedString()
-        XCTAssertTrue(stdB64.contains("+") || stdB64.contains("/"),
-                      "test precondition: std base64 should contain + or /")
+        XCTAssertTrue(
+            stdB64.contains("+") || stdB64.contains("/"),
+            "test precondition: std base64 should contain + or /")
         let url = base64URLEncode(data)
         XCTAssertFalse(url.contains("+"))
         XCTAssertFalse(url.contains("/"))

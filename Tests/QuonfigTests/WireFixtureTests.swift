@@ -12,11 +12,13 @@ final class WireFixtureTests: XCTestCase {
     // MARK: Fixture loading
 
     private func fixtureData(_ name: String) throws -> Data {
-        guard let url = Bundle.module.url(
-            forResource: name,
-            withExtension: nil,
-            subdirectory: "Fixtures"
-        ) else {
+        guard
+            let url = Bundle.module.url(
+                forResource: name,
+                withExtension: nil,
+                subdirectory: "Fixtures"
+            )
+        else {
             XCTFail("missing fixture: Fixtures/\(name)")
             throw CocoaError(.fileNoSuchFile)
         }

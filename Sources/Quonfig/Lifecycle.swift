@@ -1,9 +1,9 @@
 import Foundation
 
 #if canImport(UIKit)
-import UIKit
+    import UIKit
 #elseif canImport(AppKit)
-import AppKit
+    import AppKit
 #endif
 
 /// Abstracts the platform's app-lifecycle notifications behind a protocol so the
@@ -43,21 +43,21 @@ public struct SystemLifecycleProvider: LifecycleProvider {
 
     public var foregroundNotification: Notification.Name? {
         #if canImport(UIKit)
-        return UIApplication.didBecomeActiveNotification
+            return UIApplication.didBecomeActiveNotification
         #elseif canImport(AppKit)
-        return NSApplication.didBecomeActiveNotification
+            return NSApplication.didBecomeActiveNotification
         #else
-        return nil
+            return nil
         #endif
     }
 
     public var backgroundNotification: Notification.Name? {
         #if canImport(UIKit)
-        return UIApplication.didEnterBackgroundNotification
+            return UIApplication.didEnterBackgroundNotification
         #elseif canImport(AppKit)
-        return NSApplication.didResignActiveNotification
+            return NSApplication.didResignActiveNotification
         #else
-        return nil
+            return nil
         #endif
     }
 }

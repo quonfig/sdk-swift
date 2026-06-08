@@ -86,7 +86,8 @@ public final class Persistence: @unchecked Sendable {
 
     static func defaultFileDirectory() -> URL {
         let fm = FileManager.default
-        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        let base =
+            fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? fm.temporaryDirectory
         return base.appendingPathComponent(suiteName, isDirectory: true)
             .appendingPathComponent("cache", isDirectory: true)
@@ -204,7 +205,7 @@ public final class Persistence: @unchecked Sendable {
 
     private func loadIndexLocked() -> CacheIndex {
         guard let data = store.readIndex(),
-              let index = try? JSONDecoder().decode(CacheIndex.self, from: data)
+            let index = try? JSONDecoder().decode(CacheIndex.self, from: data)
         else {
             return CacheIndex()
         }
@@ -373,8 +374,7 @@ final class InMemoryFallbackStore: PersistenceStore, @unchecked Sendable {
 
     func write(key: String, data: Data, inline: Bool) {
         lock.lock(); defer { lock.unlock() }
-        if inline { inlineData[key] = data; fileData[key] = nil }
-        else { fileData[key] = data; inlineData[key] = nil }
+        if inline { inlineData[key] = data; fileData[key] = nil } else { fileData[key] = data; inlineData[key] = nil }
     }
     func read(key: String, inline: Bool) -> Data? {
         lock.lock(); defer { lock.unlock() }

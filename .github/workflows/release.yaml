@@ -1,0 +1,80 @@
+name: Release
+on:
+  push:
+    tags:
+      - "v*"
+
+# Tag-driven release (like sdk-go / sdk-java — no npm gate). The git tag IS the
+# SPM release; consumers resolve `from: "X.Y.Z"` straight from the tag. This
+# workflow does NOT publish anything to a registry — for SPM there is nothing to
+# publish, and CocoaPods `pod trunk push` is a human-gated manual step (see
+# RELEASING.md). All it does is verify the tag is internally consistent, re-run
+# the test gate against the tagged commit, and cut a GitHub Release.
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Verify + GitHub Release
+    runs-on: macos-15
+    steps:
+      - name: Checkout sdk-swift
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.app
+
+      # Guard: the tag (vX.Y.Z) must match quonfigVersion in Version.swift AND
+      # s.version in the podspec. A mismatch means a half-bumped release — fail
+      # before anything ships rather than tag X.Y.Z with the code still on the
+      # old version.
+      - name: Verify tag matches source + podspec version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          src=$(grep -oE 'quonfigVersion = "[0-9]+\.[0-9]+\.[0-9]+"' Sources/Quonfig/Version.swift | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          pod=$(grep -oE 's\.version[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' Quonfig.podspec | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          echo "tag=$tag version.swift=$src podspec=$pod"
+          if [ "$tag" != "$src" ] || [ "$tag" != "$pod" ]; then
+            echo "::error::Version mismatch — tag '$tag', Version.swift '$src', podspec '$pod' must all match."
+            exit 1
+          fi
+
+      # Re-run the gate against the tagged commit so a broken tag never becomes a
+      # release. (Cheaper than the full CI matrix; this is the release smoke.)
+      - name: Check formatting (swift-format)
+        run: |
+          swift format lint --strict --recursive \
+            --configuration .swift-format \
+            Sources Tests test-swift/Sources
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test
+
+      - name: Verify PrivacyInfo.xcprivacy is bundled
+        run: |
+          bundle_manifest=$(find .build -path '*quonfig-swift_Quonfig.bundle/PrivacyInfo.xcprivacy' | head -n1)
+          if [ -z "$bundle_manifest" ]; then
+            echo "::error::PrivacyInfo.xcprivacy is NOT in the built resource bundle."
+            exit 1
+          fi
+          echo "Found bundled privacy manifest: $bundle_manifest"
+
+      # Cut the GitHub Release from the tag. This is the SPM "publish" — there is
+      # no artifact to upload; SPM consumers resolve the tag directly.
+      #
+      # CocoaPods `pod trunk push` is intentionally NOT run here. Publishing to
+      # the public CocoaPods trunk is a production-facing, irreversible release
+      # and is gated on human sign-off (RELEASING.md). A maintainer runs it
+      # manually after this release is cut.
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag

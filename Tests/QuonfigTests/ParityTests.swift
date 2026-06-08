@@ -75,8 +75,9 @@ final class ParityTests: XCTestCase {
     // MARK: - Fixtures
 
     private func fixtureData(_ name: String) throws -> Data {
-        guard let url = Bundle.module.url(
-            forResource: name, withExtension: nil, subdirectory: "Fixtures")
+        guard
+            let url = Bundle.module.url(
+                forResource: name, withExtension: nil, subdirectory: "Fixtures")
         else {
             XCTFail("missing fixture: Fixtures/\(name)")
             throw CocoaError(.fileNoSuchFile)
@@ -136,7 +137,7 @@ final class ParityTests: XCTestCase {
         try await store.refresh(using: loader)
         XCTAssertTrue(store.isReady)
 
-        XCTAssertTrue(store.isEnabled("new-checkout"))           // bool true
+        XCTAssertTrue(store.isEnabled("new-checkout"))  // bool true
         XCTAssertEqual(store.string("button-color", default: "x"), "green")
         XCTAssertEqual(store.int("rate-limit", default: 0), 250)
         let pricing = try XCTUnwrap(store.json("pricing"))
@@ -230,7 +231,8 @@ final class ParityTests: XCTestCase {
     /// Decode a percent+base64url-encoded path segment back to its raw JSON bytes.
     private func decodeEncodedSegment(_ segment: String) throws -> Data {
         let unescaped = segment.removingPercentEncoding ?? segment
-        var b64 = unescaped
+        var b64 =
+            unescaped
             .replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/")
         // Re-pad to a multiple of 4.
@@ -357,7 +359,7 @@ final class ParityTests: XCTestCase {
         defer { token.cancel() }
 
         try await store.refresh(using: loader)
-        XCTAssertTrue(store.isEnabled("new-checkout"))   // canonical: true
+        XCTAssertTrue(store.isEnabled("new-checkout"))  // canonical: true
         XCTAssertEqual(store.string("button-color", default: "x"), "green")
         XCTAssertEqual(counter.value, 1)
 
@@ -400,14 +402,17 @@ final class ParityTests: XCTestCase {
             let store = Store()
             try await store.refresh(using: makeLoader(client: client, context: userContext("u_1")))
 
-            XCTAssertTrue(store.isEnabled("new-checkout"),
+            XCTAssertTrue(
+                store.isEnabled("new-checkout"),
                 "value read must survive stripping optional \(field)")
-            XCTAssertEqual(store.string("button-color", default: "x"), "green",
+            XCTAssertEqual(
+                store.string("button-color", default: "x"), "green",
                 "value read must survive stripping optional \(field)")
             // With `reason` stripped, details() falls back to STATIC (JS parity).
             let details = store.details("new-checkout")
             if field == "reason" {
-                XCTAssertEqual(details.reason, .static,
+                XCTAssertEqual(
+                    details.reason, .static,
                     "absent reason must fall back to STATIC, not error")
             }
         }
@@ -435,8 +440,7 @@ final class SharedMemoryStore: PersistenceStore, @unchecked Sendable {
 
     func write(key: String, data: Data, inline: Bool) {
         lock.lock(); defer { lock.unlock() }
-        if inline { inlineData[key] = data; fileData[key] = nil }
-        else { fileData[key] = data; inlineData[key] = nil }
+        if inline { inlineData[key] = data; fileData[key] = nil } else { fileData[key] = data; inlineData[key] = nil }
     }
     func read(key: String, inline: Bool) -> Data? {
         lock.lock(); defer { lock.unlock() }

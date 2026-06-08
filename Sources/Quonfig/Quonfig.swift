@@ -305,9 +305,10 @@ public final class Quonfig: @unchecked Sendable {
         // ready with an empty envelope so getters return caller defaults rather
         // than hanging on `isReady == false` (LD startWaitSeconds fallback).
         if !store.isReady {
-            await store.apply(EvalEnvelope(
-                evaluations: [:],
-                meta: EvalMeta(version: "", environment: "", workspaceId: nil)))
+            await store.apply(
+                EvalEnvelope(
+                    evaluations: [:],
+                    meta: EvalMeta(version: "", environment: "", workspaceId: nil)))
         }
     }
 

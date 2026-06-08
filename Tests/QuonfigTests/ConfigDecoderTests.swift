@@ -12,8 +12,9 @@ import XCTest
 ///   - an unknown `reason` decodes to `.error`, never failing the envelope.
 final class ConfigDecoderTests: XCTestCase {
     private func fixtureData(_ name: String) throws -> Data {
-        guard let url = Bundle.module.url(
-            forResource: name, withExtension: nil, subdirectory: "Fixtures")
+        guard
+            let url = Bundle.module.url(
+                forResource: name, withExtension: nil, subdirectory: "Fixtures")
         else {
             XCTFail("missing fixture: Fixtures/\(name)")
             throw CocoaError(.fileNoSuchFile)
@@ -46,7 +47,7 @@ final class ConfigDecoderTests: XCTestCase {
         XCTAssertEqual(stat.reason, .static)
         XCTAssertEqual(stat.value.type, "bool")
         XCTAssertEqual(stat.value.value, .bool(true))
-        XCTAssertNil(stat.ruleIndex)        // STATIC omits indexes
+        XCTAssertNil(stat.ruleIndex)  // STATIC omits indexes
         XCTAssertNil(stat.weightedValueIndex)
 
         let target = try XCTUnwrap(env.evaluations["button-color"])
@@ -61,7 +62,7 @@ final class ConfigDecoderTests: XCTestCase {
         XCTAssertEqual(split.weightedValueIndex, 2)
 
         let intCfg = try XCTUnwrap(env.evaluations["rate-limit"])
-        XCTAssertEqual(intCfg.value.value, .int(250))   // int stays exact, not double
+        XCTAssertEqual(intCfg.value.value, .int(250))  // int stays exact, not double
 
         let json = try XCTUnwrap(env.evaluations["pricing"])
         if case .object(let obj)? = json.value.value {
@@ -80,7 +81,7 @@ final class ConfigDecoderTests: XCTestCase {
     /// Flagsmith #70/#28, Unleash #83/#84.)
     func testFieldStripEveryOptionalDecodes() throws {
         let optionalEvalFields = ["reason", "ruleIndex", "weightedValueIndex"]
-        let optionalMetaFields = ["workspaceId"] // already absent, but assert present-then-stripped too
+        let optionalMetaFields = ["workspaceId"]  // already absent, but assert present-then-stripped too
 
         for field in optionalEvalFields {
             var root = try fixtureJSON("eval-with-context.response.json")
@@ -119,7 +120,7 @@ final class ConfigDecoderTests: XCTestCase {
         var root = try fixtureJSON("eval-with-context.response.json")
         var evals = root["evaluations"] as! [String: Any]
         var e = evals["new-checkout"] as! [String: Any]
-        e["reason"] = "QUANTUM_SUPERPOSITION" // never emitted by the server
+        e["reason"] = "QUANTUM_SUPERPOSITION"  // never emitted by the server
         evals["new-checkout"] = e
         root["evaluations"] = evals
 

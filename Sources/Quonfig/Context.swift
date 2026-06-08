@@ -1,5 +1,5 @@
-import Foundation
 import CryptoKit
+import Foundation
 
 /// A scalar context value. Quonfig contexts are flat per namespace — only
 /// scalars and string arrays match operators at runtime; nested objects are
@@ -103,22 +103,24 @@ func base64URLEncode(_ data: Data) -> String {
 /// apps). The default is a SHA256 over the canonical context JSON.
 public typealias ContextFingerprintFn = @Sendable (QuonfigContext) -> String
 
-public extension QuonfigContext {
+extension QuonfigContext {
     /// The path segment for `GET /api/v2/configs/eval-with-context/{ctx}`:
     /// `percentEncode(base64url(canonicalContextJSON))`.
     ///
     /// `base64url` guarantees no `+`/`/`; the percent-encode against the
     /// RFC 3986 unreserved set guarantees nothing else (incl. a stray `+`)
     /// ever reaches the server's path decoder.
-    func encodedPathSegment() throws -> String {
+    public func encodedPathSegment() throws -> String {
         let json = try canonicalJSONData()
         let b64url = base64URLEncode(json)
         // base64url's alphabet (`A–Z a–z 0–9 - _`) is entirely within the
         // unreserved set, so this is a no-op for well-formed input but defends
         // against any future alphabet change.
-        guard let encoded = b64url.addingPercentEncoding(
-            withAllowedCharacters: rfc3986Unreserved
-        ) else {
+        guard
+            let encoded = b64url.addingPercentEncoding(
+                withAllowedCharacters: rfc3986Unreserved
+            )
+        else {
             // Should be unreachable for a base64url string; fail loud.
             throw QuonfigContextError.encodingFailed
         }
@@ -127,7 +129,7 @@ public extension QuonfigContext {
 
     /// Default SHA256 fingerprint over the canonical context JSON, hex-encoded.
     /// Used for cache keying (LD stores a SHA256-of-context as `fingerprint-<key>`).
-    func defaultFingerprint() -> String {
+    public func defaultFingerprint() -> String {
         let data = (try? canonicalJSONData()) ?? Data()
         return sha256Hex(data)
     }

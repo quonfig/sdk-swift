@@ -4,7 +4,7 @@ import XCTest
 @testable import Quonfig
 
 #if canImport(FoundationNetworking)
-import FoundationNetworking
+    import FoundationNetworking
 #endif
 
 /// Loader behaviour: URL shape, HTTP Basic auth, ETag conditional GET, 304/204
@@ -49,8 +49,9 @@ final class LoaderTests: XCTestCase {
     }
 
     private func fixtureData(_ name: String) throws -> Data {
-        guard let url = Bundle.module.url(
-            forResource: name, withExtension: nil, subdirectory: "Fixtures")
+        guard
+            let url = Bundle.module.url(
+                forResource: name, withExtension: nil, subdirectory: "Fixtures")
         else {
             XCTFail("missing fixture: Fixtures/\(name)")
             throw CocoaError(.fileNoSuchFile)
@@ -77,8 +78,9 @@ final class LoaderTests: XCTestCase {
 
         let req = try XCTUnwrap(mock.requests.first)
         let urlString = try XCTUnwrap(req.url?.absoluteString)
-        XCTAssertTrue(urlString.hasPrefix(
-            "https://primary.quonfig.com/api/v2/configs/eval-with-context/"))
+        XCTAssertTrue(
+            urlString.hasPrefix(
+                "https://primary.quonfig.com/api/v2/configs/eval-with-context/"))
         XCTAssertTrue(urlString.hasSuffix("?collectContextMode=PERIODIC_EXAMPLE"))
         XCTAssertEqual(req.httpMethod, "GET")
 
@@ -180,7 +182,7 @@ final class LoaderTests: XCTestCase {
         let body = try fixtureData("eval-with-context.response.json")
         let secondary = URL(string: "https://secondary.quonfig.com")!
         let mock = MockClient([.init(status: 200, headers: ["ETag": "e"], body: body)])
-        mock.throwUntilIndex = 0 // first call (primary) throws, second (secondary) succeeds
+        mock.throwUntilIndex = 0  // first call (primary) throws, second (secondary) succeeds
 
         let loader = Loader(
             sdkKey: "k", context: sampleContext(),
@@ -224,13 +226,13 @@ final class LoaderTests: XCTestCase {
         let body = try fixtureData("eval-with-context.response.json")
         let mock = MockClient([
             .init(status: 200, headers: ["ETag": "e1"], body: body),
-            .init(status: 200, headers: [:], body: body), // no ETag this time
+            .init(status: 200, headers: [:], body: body),  // no ETag this time
             .init(status: 200, headers: ["ETag": "e2"], body: body),
         ])
         let loader = Loader(sdkKey: "k", context: sampleContext(), apiURLs: [apiURL], client: mock)
 
         _ = try await loader.load()
-        _ = try await loader.load() // server drops ETag -> cache forgotten
+        _ = try await loader.load()  // server drops ETag -> cache forgotten
         _ = try await loader.load()
 
         // Third request must NOT carry If-None-Match (cache was dropped).

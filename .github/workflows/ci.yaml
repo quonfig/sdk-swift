@@ -1,0 +1,114 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# macOS runners are ~10x the cost/slowness of Linux (plan §4.5), so the suite is
+# deliberately lean: one fast SPM unit pass that gates everything (format + build
+# + test + TSan + the privacy-manifest bundle check), and a single xcodebuild
+# matrix that proves the package compiles and tests on a real iOS simulator and
+# on macOS. We do NOT fan the xcodebuild matrix across many OS versions — the SPM
+# job already runs the full XCTest suite; xcodebuild only has to prove the
+# Xcode/simulator build path works.
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast gate: formatting + SPM build + full XCTest suite + TSan + privacy check.
+  # Runs first and on its own so a format slip or a unit-test failure fails in
+  # ~1 min without paying for the slower xcodebuild simulator boot.
+  spm:
+    name: SPM (format + build + test + TSan)
+    runs-on: macos-15
+    steps:
+      - name: Checkout sdk-swift
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.app
+
+      - name: Swift version
+        run: swift --version
+
+      # Formatting gate (per .claude/rules/formatters.md — every SDK in the
+      # family runs a formatter check in CI). swift-format ships inside the
+      # Swift 6 toolchain as the `swift format` subcommand; no install needed.
+      # --strict makes lint warnings fail the job. Config is .swift-format.
+      - name: Check formatting (swift-format)
+        run: |
+          swift format lint --strict --recursive \
+            --configuration .swift-format \
+            Sources Tests test-swift/Sources
+
+      - name: Build (StrictConcurrency=complete)
+        run: swift build
+
+      - name: Test
+        run: swift test
+
+      # ThreadSanitizer run (Unleash precedent — concurrency tests at high
+      # contention must run clean; plan §2.10, §7.13). The actor + DispatchSource
+      # poller are the data-race surface; TSan is the gate that keeps them clean.
+      - name: Test (ThreadSanitizer)
+        run: swift test --sanitize=thread
+
+      # Release check (plan §1, §2.10, §6 step 6 — the Statsig trap): the privacy
+      # manifest must be wired into Package.swift resources AND actually land in
+      # the built resource bundle, or App Store consumers won't ship it.
+      - name: Verify PrivacyInfo.xcprivacy is bundled
+        run: |
+          bundle_manifest=$(find .build -path '*quonfig-swift_Quonfig.bundle/PrivacyInfo.xcprivacy' | head -n1)
+          if [ -z "$bundle_manifest" ]; then
+            echo "::error::PrivacyInfo.xcprivacy is NOT in the built resource bundle. Check the .process() resource in Package.swift."
+            exit 1
+          fi
+          echo "Found bundled privacy manifest: $bundle_manifest"
+
+      # The validation / smoke app must keep compiling and running headless
+      # against its in-process fixture server (test-swift/, plan §6 step 6).
+      - name: Build + run test-swift validation app
+        working-directory: test-swift
+        run: |
+          swift build
+          swift run TestSwiftApp
+
+  # Cross-platform proof: the package compiles and tests through xcodebuild on a
+  # real iOS simulator and on macOS. Kept to two destinations to bound macOS
+  # runner cost. A generic simulator destination ("name=iPhone ...") lets the
+  # runner pick whatever iOS runtime ships with the Xcode it has, so we don't
+  # pin a simulator that a future runner image drops.
+  xcodebuild:
+    name: xcodebuild (${{ matrix.name }})
+    runs-on: macos-15
+    needs: spm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: iOS Simulator
+            destination: "platform=iOS Simulator,name=iPhone 16"
+          - name: macOS
+            destination: "platform=macOS"
+    steps:
+      - name: Checkout sdk-swift
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.app
+
+      # NOTE: xcodebuild derives the scheme name from the SPM package `name:`
+      # ("quonfig-swift"), NOT from the product/library name ("Quonfig").
+      # `xcodebuild -list` confirms the scheme is "quonfig-swift".
+      - name: Resolve package
+        run: xcodebuild -resolvePackageDependencies -scheme quonfig-swift
+
+      - name: Test (${{ matrix.name }})
+        run: |
+          xcodebuild test \
+            -scheme quonfig-swift \
+            -destination "${{ matrix.destination }}" \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO
