@@ -168,7 +168,10 @@ final class StoreTests: XCTestCase {
     func testUnchangedApplyDoesNotNotify() async {
         let store = Store()
         let counter = Counter()
-        _ = await store.subscribe { counter.increment() }
+        // Retain the token for the test's lifetime: a dropped token tears down
+        // its subscription on deinit (documented SubscriptionToken contract), so
+        // `_ =` would race the cancellation against the apply below.
+        let token = await store.subscribe { counter.increment() }
 
         let env = envelope(["flag": eval(type: "bool", value: .bool(true))])
         let firstChanged = await store.apply(env)
@@ -179,12 +182,13 @@ final class StoreTests: XCTestCase {
         let secondChanged = await store.apply(env)
         XCTAssertFalse(secondChanged)
         XCTAssertEqual(counter.value, 1)
+        withExtendedLifetime(token) {}
     }
 
     func testChangedApplyNotifies() async {
         let store = Store()
         let counter = Counter()
-        _ = await store.subscribe { counter.increment() }
+        let token = await store.subscribe { counter.increment() }
 
         await store.apply(envelope(["flag": eval(type: "bool", value: .bool(true))]))
         XCTAssertEqual(counter.value, 1)
@@ -193,12 +197,13 @@ final class StoreTests: XCTestCase {
         let changed = await store.apply(envelope(["flag": eval(type: "bool", value: .bool(false))]))
         XCTAssertTrue(changed)
         XCTAssertEqual(counter.value, 2)
+        withExtendedLifetime(token) {}
     }
 
     func testHashIsOrderIndependent() async {
         let store = Store()
         let counter = Counter()
-        _ = await store.subscribe { counter.increment() }
+        let token = await store.subscribe { counter.increment() }
 
         let a = envelope([
             "x": eval(type: "int", value: .int(1)),
@@ -212,6 +217,7 @@ final class StoreTests: XCTestCase {
         await store.apply(a)
         await store.apply(b)
         XCTAssertEqual(counter.value, 1)
+        withExtendedLifetime(token) {}
     }
 
     // MARK: - Subscriber isolation + cancellation
@@ -243,11 +249,12 @@ final class StoreTests: XCTestCase {
     func testMultipleSubscribersAllFire() async {
         let store = Store()
         let c1 = Counter(), c2 = Counter()
-        _ = await store.subscribe { c1.increment() }
-        _ = await store.subscribe { c2.increment() }
+        let t1 = await store.subscribe { c1.increment() }
+        let t2 = await store.subscribe { c2.increment() }
         await store.apply(envelope(["a": eval(type: "int", value: .int(1))]))
         XCTAssertEqual(c1.value, 1)
         XCTAssertEqual(c2.value, 1)
+        withExtendedLifetime((t1, t2)) {}
     }
 
     // MARK: - Reads-before-ready replay

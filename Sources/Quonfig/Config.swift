@@ -31,6 +31,13 @@ public enum EvaluationReason: String, Sendable, Equatable, Codable {
         let raw = try decoder.singleValueContainer().decode(String.self)
         self = EvaluationReason(wire: raw)
     }
+
+    /// Encodable so the resolved envelope can be round-tripped to the on-disk
+    /// persistence cache (qfg-2t2d.5). Emits the wire rawValue.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(rawValue)
+    }
 }
 
 /// The inner value wrapper from the wire: `{ "type": <ValueType>, "value": <any> }`.
@@ -40,7 +47,7 @@ public enum EvaluationReason: String, Sendable, Equatable, Codable {
 /// are decoded-if-present so a future server build that emits them never breaks
 /// the decode). `value` is polymorphic; we keep it as a `QuonfigJSONValue` so the
 /// typed accessors in `Quonfig` can coerce it without a second parse.
-public struct WireValue: Sendable, Equatable, Decodable {
+public struct WireValue: Sendable, Equatable, Codable {
     /// The inner value type tag (`bool | int | double | string | json |
     /// string_list | log_level | weighted_values | schema | provided`).
     public let type: String
@@ -64,6 +71,13 @@ public struct WireValue: Sendable, Equatable, Decodable {
         type = try c.decodeIfPresent(String.self, forKey: .type) ?? ""
         value = try c.decodeIfPresent(QuonfigJSONValue.self, forKey: .value)
     }
+
+    /// Encodable for the persistence cache (qfg-2t2d.5).
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(type, forKey: .type)
+        try c.encodeIfPresent(value, forKey: .value)
+    }
 }
 
 /// A single evaluated config/flag entry from the `eval-with-context` envelope.
@@ -74,7 +88,7 @@ public struct WireValue: Sendable, Equatable, Decodable {
 /// `decodeIfPresent` — they are absent (never `null`) when empty, and a
 /// non-optional decode would break the whole SDK on a future server-added field
 /// (Flagsmith #70/#28, Unleash #83/#84 — plan §2.3/§2.10).
-public struct Evaluation: Sendable, Equatable, Decodable {
+public struct Evaluation: Sendable, Equatable, Codable {
     public let value: WireValue
     public let configId: String
     public let configType: String
@@ -123,6 +137,20 @@ public struct Evaluation: Sendable, Equatable, Decodable {
         ruleIndex = try c.decodeIfPresent(Int.self, forKey: .ruleIndex)
         weightedValueIndex = try c.decodeIfPresent(Int.self, forKey: .weightedValueIndex)
     }
+
+    /// Encodable for the persistence cache (qfg-2t2d.5). Optionals use
+    /// `encodeIfPresent` so a re-decode of the cache file sees the same
+    /// omitempty shape as the wire (absent, not null).
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(value, forKey: .value)
+        try c.encode(configId, forKey: .configId)
+        try c.encode(configType, forKey: .configType)
+        try c.encode(valueType, forKey: .valueType)
+        try c.encodeIfPresent(reason, forKey: .reason)
+        try c.encodeIfPresent(ruleIndex, forKey: .ruleIndex)
+        try c.encodeIfPresent(weightedValueIndex, forKey: .weightedValueIndex)
+    }
 }
 
 /// Response metadata. Mirrors `api-delivery/internal/config/types.go` `Meta`.
@@ -130,7 +158,7 @@ public struct Evaluation: Sendable, Equatable, Decodable {
 /// `ServeHTTP` builds `Meta` with only `Version` + `Environment` for the
 /// frontend eval path, so `workspaceId` (`omitempty`) is absent on the wire —
 /// decoded-if-present so a future build that includes it is handled gracefully.
-public struct EvalMeta: Sendable, Equatable, Decodable {
+public struct EvalMeta: Sendable, Equatable, Codable {
     public let version: String
     public let environment: String
     public let workspaceId: String?
@@ -151,6 +179,14 @@ public struct EvalMeta: Sendable, Equatable, Decodable {
         environment = try c.decode(String.self, forKey: .environment)
         workspaceId = try c.decodeIfPresent(String.self, forKey: .workspaceId)
     }
+
+    /// Encodable for the persistence cache (qfg-2t2d.5).
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(version, forKey: .version)
+        try c.encode(environment, forKey: .environment)
+        try c.encodeIfPresent(workspaceId, forKey: .workspaceId)
+    }
 }
 
 /// The full `eval-with-context` response envelope.
@@ -158,7 +194,7 @@ public struct EvalMeta: Sendable, Equatable, Decodable {
 /// Mirrors `api-delivery/internal/config/types.go` `EvalEnvelope` and
 /// `sdk-javascript/src/types.ts` `EvaluationPayload`:
 ///   `{ evaluations: { <key>: Evaluation }, meta: EvalMeta }`.
-public struct EvalEnvelope: Sendable, Equatable, Decodable {
+public struct EvalEnvelope: Sendable, Equatable, Codable {
     public let evaluations: [String: Evaluation]
     public let meta: EvalMeta
 
@@ -176,6 +212,13 @@ public struct EvalEnvelope: Sendable, Equatable, Decodable {
         evaluations = try c.decode([String: Evaluation].self, forKey: .evaluations)
         meta = try c.decode(EvalMeta.self, forKey: .meta)
     }
+
+    /// Encodable for the persistence cache (qfg-2t2d.5).
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(evaluations, forKey: .evaluations)
+        try c.encode(meta, forKey: .meta)
+    }
 }
 
 /// A minimal JSON value graph used to carry the polymorphic `value.value` field
@@ -185,7 +228,7 @@ public struct EvalEnvelope: Sendable, Equatable, Decodable {
 /// native JSON (object/array/etc.), or string list. We preserve it losslessly so
 /// the typed accessors in `Quonfig` (qfg-2t2d.6+) can coerce on read. Integers
 /// are distinguished from doubles so `int(...)` accessors are exact.
-public enum QuonfigJSONValue: Sendable, Equatable, Hashable, Decodable {
+public enum QuonfigJSONValue: Sendable, Equatable, Hashable, Codable {
     case null
     case bool(Bool)
     case int(Int64)
@@ -218,6 +261,22 @@ public enum QuonfigJSONValue: Sendable, Equatable, Hashable, Decodable {
         } else {
             throw DecodingError.dataCorruptedError(
                 in: c, debugDescription: "Unsupported JSON value")
+        }
+    }
+
+    /// Encodable so the value graph round-trips through the persistence cache
+    /// (qfg-2t2d.5). `int` encodes as a JSON integer (preserved exact) and
+    /// `double` as a JSON number, mirroring the decode branch order.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .null: try c.encodeNil()
+        case .bool(let b): try c.encode(b)
+        case .int(let i): try c.encode(i)
+        case .double(let d): try c.encode(d)
+        case .string(let s): try c.encode(s)
+        case .array(let arr): try c.encode(arr)
+        case .object(let obj): try c.encode(obj)
         }
     }
 

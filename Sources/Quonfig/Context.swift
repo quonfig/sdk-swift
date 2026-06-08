@@ -129,9 +129,19 @@ public extension QuonfigContext {
     /// Used for cache keying (LD stores a SHA256-of-context as `fingerprint-<key>`).
     func defaultFingerprint() -> String {
         let data = (try? canonicalJSONData()) ?? Data()
-        let digest = SHA256.hash(data: data)
-        return digest.map { String(format: "%02x", $0) }.joined()
+        return sha256Hex(data)
     }
+}
+
+/// SHA256 hex digest of arbitrary bytes. Shared by the context fingerprint and
+/// the persistence layer's safe-filename derivation.
+func sha256Hex(_ data: Data) -> String {
+    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+}
+
+/// SHA256 hex digest of a UTF-8 string.
+func sha256Hex(_ string: String) -> String {
+    sha256Hex(Data(string.utf8))
 }
 
 /// The default injectable fingerprint function (SHA256 hex of canonical JSON).
