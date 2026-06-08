@@ -1,0 +1,223 @@
+import Foundation
+
+/// The OpenFeature-compatible resolution reason carried alongside each
+/// evaluated value.
+///
+/// The server (`api-delivery/internal/serve/eval_context.go` `resolutionReason`)
+/// emits exactly three values on the wire: `STATIC`, `TARGETING_MATCH`, `SPLIT`.
+/// The SDK synthesizes two more for caller-facing semantics, mirroring
+/// `sdk-javascript/src/types.ts` `EvaluationReason`:
+///   - `DEFAULT` — the key was absent from the envelope, so the caller's default
+///     was returned.
+///   - `ERROR`  — a value was served stale/from cache after a failure, OR an
+///     unknown reason arrived on the wire.
+///
+/// Per plan §2.3 / §2.10: an **unknown** wire `reason` decodes to `.error`,
+/// never failing the envelope (Flagsmith #70; Unleash #83).
+public enum EvaluationReason: String, Sendable, Equatable, Codable {
+    case `static` = "STATIC"
+    case targetingMatch = "TARGETING_MATCH"
+    case split = "SPLIT"
+    case `default` = "DEFAULT"
+    case error = "ERROR"
+
+    /// Decode a wire string, falling back to `.error` for any unknown value
+    /// instead of throwing (the §2.10 "unknown reason -> ERROR" rule).
+    public init(wire raw: String) {
+        self = EvaluationReason(rawValue: raw) ?? .error
+    }
+
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = EvaluationReason(wire: raw)
+    }
+}
+
+/// The inner value wrapper from the wire: `{ "type": <ValueType>, "value": <any> }`.
+///
+/// Mirrors `api-delivery/internal/config/types.go` `Value` (the `confidential` /
+/// `decryptWith` fields are `omitempty` and irrelevant to frontend clients, but
+/// are decoded-if-present so a future server build that emits them never breaks
+/// the decode). `value` is polymorphic; we keep it as a `QuonfigJSONValue` so the
+/// typed accessors in `Quonfig` can coerce it without a second parse.
+public struct WireValue: Sendable, Equatable, Decodable {
+    /// The inner value type tag (`bool | int | double | string | json |
+    /// string_list | log_level | weighted_values | schema | provided`).
+    public let type: String
+    /// The decoded value, kept as a JSON value graph for typed coercion.
+    public let value: QuonfigJSONValue?
+
+    enum CodingKeys: String, CodingKey {
+        case type, value
+    }
+
+    public init(type: String, value: QuonfigJSONValue?) {
+        self.type = type
+        self.value = value
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // `type` is always present on a well-formed wire value, but decodeIfPresent
+        // keeps a malformed/partial value from blowing up the whole envelope —
+        // the §2.10 decoder-safety rule applies to every field.
+        type = try c.decodeIfPresent(String.self, forKey: .type) ?? ""
+        value = try c.decodeIfPresent(QuonfigJSONValue.self, forKey: .value)
+    }
+}
+
+/// A single evaluated config/flag entry from the `eval-with-context` envelope.
+///
+/// Mirrors `api-delivery/internal/config/types.go` `EvalResult` and
+/// `sdk-javascript/src/types.ts` `Evaluation`. Every server-`omitempty` field
+/// (`reason`, `ruleIndex`, `weightedValueIndex`) is decoded with
+/// `decodeIfPresent` — they are absent (never `null`) when empty, and a
+/// non-optional decode would break the whole SDK on a future server-added field
+/// (Flagsmith #70/#28, Unleash #83/#84 — plan §2.3/§2.10).
+public struct Evaluation: Sendable, Equatable, Decodable {
+    public let value: WireValue
+    public let configId: String
+    public let configType: String
+    public let valueType: String
+    /// Server emits only STATIC/TARGETING_MATCH/SPLIT; an unknown value decodes
+    /// to `.error` (never failing). Absent on older builds -> `nil` here, which
+    /// the SDK treats as STATIC caller-side.
+    public let reason: EvaluationReason?
+    /// Present only for TARGETING_MATCH / SPLIT (eval_context.go emits indexes
+    /// only for those reason classes); otherwise omitted.
+    public let ruleIndex: Int?
+    /// Present only for SPLIT; otherwise omitted.
+    public let weightedValueIndex: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case value, configId, configType, valueType
+        case reason, ruleIndex, weightedValueIndex
+    }
+
+    public init(
+        value: WireValue,
+        configId: String,
+        configType: String,
+        valueType: String,
+        reason: EvaluationReason?,
+        ruleIndex: Int?,
+        weightedValueIndex: Int?
+    ) {
+        self.value = value
+        self.configId = configId
+        self.configType = configType
+        self.valueType = valueType
+        self.reason = reason
+        self.ruleIndex = ruleIndex
+        self.weightedValueIndex = weightedValueIndex
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        value = try c.decode(WireValue.self, forKey: .value)
+        configId = try c.decode(String.self, forKey: .configId)
+        configType = try c.decode(String.self, forKey: .configType)
+        valueType = try c.decode(String.self, forKey: .valueType)
+        // Every optional uses decodeIfPresent (§2.10).
+        reason = try c.decodeIfPresent(EvaluationReason.self, forKey: .reason)
+        ruleIndex = try c.decodeIfPresent(Int.self, forKey: .ruleIndex)
+        weightedValueIndex = try c.decodeIfPresent(Int.self, forKey: .weightedValueIndex)
+    }
+}
+
+/// Response metadata. Mirrors `api-delivery/internal/config/types.go` `Meta`.
+///
+/// `ServeHTTP` builds `Meta` with only `Version` + `Environment` for the
+/// frontend eval path, so `workspaceId` (`omitempty`) is absent on the wire —
+/// decoded-if-present so a future build that includes it is handled gracefully.
+public struct EvalMeta: Sendable, Equatable, Decodable {
+    public let version: String
+    public let environment: String
+    public let workspaceId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case version, environment, workspaceId
+    }
+
+    public init(version: String, environment: String, workspaceId: String? = nil) {
+        self.version = version
+        self.environment = environment
+        self.workspaceId = workspaceId
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decode(String.self, forKey: .version)
+        environment = try c.decode(String.self, forKey: .environment)
+        workspaceId = try c.decodeIfPresent(String.self, forKey: .workspaceId)
+    }
+}
+
+/// The full `eval-with-context` response envelope.
+///
+/// Mirrors `api-delivery/internal/config/types.go` `EvalEnvelope` and
+/// `sdk-javascript/src/types.ts` `EvaluationPayload`:
+///   `{ evaluations: { <key>: Evaluation }, meta: EvalMeta }`.
+public struct EvalEnvelope: Sendable, Equatable, Decodable {
+    public let evaluations: [String: Evaluation]
+    public let meta: EvalMeta
+
+    enum CodingKeys: String, CodingKey {
+        case evaluations, meta
+    }
+
+    public init(evaluations: [String: Evaluation], meta: EvalMeta) {
+        self.evaluations = evaluations
+        self.meta = meta
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        evaluations = try c.decode([String: Evaluation].self, forKey: .evaluations)
+        meta = try c.decode(EvalMeta.self, forKey: .meta)
+    }
+}
+
+/// A minimal JSON value graph used to carry the polymorphic `value.value` field
+/// without committing to a concrete type at decode time.
+///
+/// The wire `value` is one of: bool, int (as a JSON number), double, string,
+/// native JSON (object/array/etc.), or string list. We preserve it losslessly so
+/// the typed accessors in `Quonfig` (qfg-2t2d.6+) can coerce on read. Integers
+/// are distinguished from doubles so `int(...)` accessors are exact.
+public enum QuonfigJSONValue: Sendable, Equatable, Decodable {
+    case null
+    case bool(Bool)
+    case int(Int64)
+    case double(Double)
+    case string(String)
+    case array([QuonfigJSONValue])
+    case object([String: QuonfigJSONValue])
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() {
+            self = .null
+            return
+        }
+        // Order matters: Bool must be probed before the numeric branches, since
+        // Foundation will happily decode `true`/`false` as a number on some
+        // platforms. Int before Double so whole numbers stay exact.
+        if let b = try? c.decode(Bool.self) {
+            self = .bool(b)
+        } else if let i = try? c.decode(Int64.self) {
+            self = .int(i)
+        } else if let d = try? c.decode(Double.self) {
+            self = .double(d)
+        } else if let s = try? c.decode(String.self) {
+            self = .string(s)
+        } else if let arr = try? c.decode([QuonfigJSONValue].self) {
+            self = .array(arr)
+        } else if let obj = try? c.decode([String: QuonfigJSONValue].self) {
+            self = .object(obj)
+        } else {
+            throw DecodingError.dataCorruptedError(
+                in: c, debugDescription: "Unsupported JSON value")
+        }
+    }
+}
