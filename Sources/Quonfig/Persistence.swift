@@ -113,6 +113,21 @@ public final class Persistence: @unchecked Sendable {
         defer { lock.unlock() }
 
         let key = Persistence.cacheKey(envKey: envKey, fingerprint: fingerprint)
+
+        // Watermark rule (spec 5h): never let a strictly-older versioned envelope
+        // regress the cached last-known-good for this context — mirrors the
+        // store's reject-older guard (Store.apply) so the on-disk cache and the
+        // in-memory snapshot can't diverge. A failover poll to the depth-1
+        // (generation 1) secondary still calls save here; without this check it
+        // would overwrite a freshly-cached high generation, so the next cold
+        // start would serve the stale secondary's config. An unversioned
+        // (generation <= 0) payload carries no ordering info and is allowed
+        // through (the carve-out), matching the install guard.
+        let incomingGen = envelope.meta.generation
+        if incomingGen > 0, let cachedGen = cachedGenerationLocked(key: key), cachedGen > incomingGen {
+            return
+        }
+
         let record = PersistedCacheRecord(
             schemaVersion: Persistence.currentSchemaVersion,
             envKey: envKey,
@@ -167,6 +182,21 @@ public final class Persistence: @unchecked Sendable {
             return nil
         }
         return record.envelope
+    }
+
+    /// `Meta.generation` of the currently-cached record for `key`, or `nil` if
+    /// there is no readable entry. The CALLER MUST HOLD `lock` (this is the
+    /// watermark-check half of `save`, which already holds it — `NSLock` is not
+    /// reentrant, so it cannot go through the public `load`).
+    private func cachedGenerationLocked(key: String) -> Int? {
+        let index = loadIndexLocked()
+        guard let entry = index.entries[key],
+            let data = store.read(key: key, inline: entry.inline),
+            let record = decodeRecord(data)
+        else {
+            return nil
+        }
+        return record.envelope.meta.generation
     }
 
     /// Decode a persisted record, running schema migration. Returns `nil` for an

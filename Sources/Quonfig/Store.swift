@@ -85,11 +85,17 @@ struct ResolvedSnapshot: Sendable {
     /// Stable hash of the applied envelope, used for diff-before-notify. `nil`
     /// means "no envelope applied yet" (cold).
     let envelopeHash: Int?
+    /// `Meta.generation` of the currently-held envelope (0 before the first
+    /// apply, or when the server is unversioned / the depth-1 secondary's gen=1
+    /// floor). The reject-older guard compares an incoming generation against
+    /// this to refuse a regression (spec 5f).
+    let generation: Int
     /// `true` once any envelope (live or cache) has been applied — gates the
     /// reads-before-ready replay (plan §2.10, Statsig #1/#36).
     let ready: Bool
 
-    static let empty = ResolvedSnapshot(evaluations: [:], envelopeHash: nil, ready: false)
+    static let empty = ResolvedSnapshot(
+        evaluations: [:], envelopeHash: nil, generation: 0, ready: false)
 }
 
 /// Stable structural hash of an envelope's evaluations, used to skip notifying
@@ -165,22 +171,36 @@ public actor Store {
     /// callbacks, even if the envelope is empty.
     @discardableResult
     public func apply(_ envelope: EvalEnvelope) -> Bool {
-        let newHash = envelopeHash(envelope.evaluations)
         let current = snapshotBox.value
         let wasReady = current.ready
+        let incomingGen = envelope.meta.generation
+
+        // Reject-older install guard (spec 5f, qfg-7h5d.2.x — frontend parity
+        // with the backend SDKs). A versioned snapshot strictly older than the
+        // held generation is dropped, so a sequential failover to the depth-1
+        // (generation 1) secondary can't regress an established client. A fresh
+        // store installs anything; an unversioned snapshot (generation <= 0 — a
+        // pre-watermark server, or an old persisted-cache record) carries no
+        // ordering information so it installs anyway (the carve-out, mandatory
+        // from day one). A same-or-newer generation installs; a same-generation
+        // snapshot whose evaluations differ is a context re-eval (the config
+        // version is the same, the context changed), not a regression, so it
+        // still applies — its hash differs, so it also notifies.
+        if wasReady, incomingGen > 0, incomingGen < current.generation {
+            return false
+        }
+
+        let newHash = envelopeHash(envelope.evaluations)
         let changed = !wasReady || current.envelopeHash != newHash
 
-        if changed {
+        // Update the snapshot when the values changed OR the generation advanced
+        // on identical values (so the held watermark stays current for the next
+        // reject-older comparison even on a no-notify poll).
+        if changed || current.generation != incomingGen {
             snapshotBox.value = ResolvedSnapshot(
                 evaluations: envelope.evaluations,
                 envelopeHash: newHash,
-                ready: true
-            )
-        } else if !wasReady {
-            // Same hash but first apply — still need to flip ready.
-            snapshotBox.value = ResolvedSnapshot(
-                evaluations: envelope.evaluations,
-                envelopeHash: newHash,
+                generation: incomingGen,
                 ready: true
             )
         }
@@ -266,6 +286,14 @@ public actor Store {
             // per-listener try/catch intent.
             listener()
         }
+    }
+
+    /// The held `Meta.generation` watermark (0 before the first apply, or when
+    /// the server is unversioned / the depth-1 secondary's gen=1 floor). Read by
+    /// the reject-older guard and the failover chaos/parity tests. Synchronous,
+    /// off-actor.
+    public nonisolated var heldGeneration: Int {
+        snapshotBox.value.generation
     }
 
     /// Test/inspection hook: live subscriber count.

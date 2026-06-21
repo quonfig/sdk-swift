@@ -162,15 +162,30 @@ public struct EvalMeta: Sendable, Equatable, Codable {
     public let version: String
     public let environment: String
     public let workspaceId: String?
+    /// Monotonic per-branch commit counter (`git rev-list --count HEAD`) the
+    /// backend stamps on every eval response (`eval_context.go`). Unlike
+    /// `version` — a commit SHA, which is unordered — a higher `generation` is
+    /// strictly newer, so the reject-older install guard (spec 5f) can order two
+    /// snapshots and refuse to regress an established client.
+    ///
+    /// Absent or `<= 0` means "unversioned" — a server that predates the
+    /// watermark — and `decodeIfPresent` defaults it to 0, so the guard's
+    /// carve-out installs it rather than freezing. The depth-1 secondary reports
+    /// `generation = 1` for everything (the "always older" standby floor, spec
+    /// 5f.1), which the strict-greater check rejects for an established client.
+    public let generation: Int
 
     enum CodingKeys: String, CodingKey {
-        case version, environment, workspaceId
+        case version, environment, workspaceId, generation
     }
 
-    public init(version: String, environment: String, workspaceId: String? = nil) {
+    public init(
+        version: String, environment: String, workspaceId: String? = nil, generation: Int = 0
+    ) {
         self.version = version
         self.environment = environment
         self.workspaceId = workspaceId
+        self.generation = generation
     }
 
     public init(from decoder: Decoder) throws {
@@ -178,6 +193,9 @@ public struct EvalMeta: Sendable, Equatable, Codable {
         version = try c.decode(String.self, forKey: .version)
         environment = try c.decode(String.self, forKey: .environment)
         workspaceId = try c.decodeIfPresent(String.self, forKey: .workspaceId)
+        // Absent on a pre-watermark server (and in old persisted cache records) —
+        // default to 0 so the guard's gen<=0 carve-out installs it.
+        generation = try c.decodeIfPresent(Int.self, forKey: .generation) ?? 0
     }
 
     /// Encodable for the persistence cache (qfg-2t2d.5).
@@ -186,6 +204,7 @@ public struct EvalMeta: Sendable, Equatable, Codable {
         try c.encode(version, forKey: .version)
         try c.encode(environment, forKey: .environment)
         try c.encodeIfPresent(workspaceId, forKey: .workspaceId)
+        try c.encode(generation, forKey: .generation)
     }
 }
 
