@@ -117,9 +117,9 @@ public final class Persistence: @unchecked Sendable {
         // Watermark rule (spec 5h): never let a strictly-older versioned envelope
         // regress the cached last-known-good for this context — mirrors the
         // store's reject-older guard (Store.apply) so the on-disk cache and the
-        // in-memory snapshot can't diverge. A failover poll to the depth-1
-        // (generation 1) secondary still calls save here; without this check it
-        // would overwrite a freshly-cached high generation, so the next cold
+        // in-memory snapshot can't diverge. A failover poll to a lagging
+        // (lower-generation) secondary still calls save here; without this check
+        // it would overwrite a freshly-cached higher generation, so the next cold
         // start would serve the stale secondary's config. An unversioned
         // (generation <= 0) payload carries no ordering info and is allowed
         // through (the carve-out), matching the install guard.

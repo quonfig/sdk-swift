@@ -170,9 +170,10 @@ public struct EvalMeta: Sendable, Equatable, Codable {
     ///
     /// Absent or `<= 0` means "unversioned" — a server that predates the
     /// watermark — and `decodeIfPresent` defaults it to 0, so the guard's
-    /// carve-out installs it rather than freezing. The depth-1 secondary reports
-    /// `generation = 1` for everything (the "always older" standby floor, spec
-    /// 5f.1), which the strict-greater check rejects for an established client.
+    /// carve-out installs it rather than freezing. Both delivery legs emit the
+    /// honest true commit count (spec 5f.1, the 2026-06-29 A2 fix): a lagging
+    /// secondary's generation is equal-or-lower, which the strict-greater check
+    /// no-ops or rejects for an established client.
     public let generation: Int
 
     enum CodingKeys: String, CodingKey {

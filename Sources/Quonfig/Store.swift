@@ -86,8 +86,8 @@ struct ResolvedSnapshot: Sendable {
     /// means "no envelope applied yet" (cold).
     let envelopeHash: Int?
     /// `Meta.generation` of the currently-held envelope (0 before the first
-    /// apply, or when the server is unversioned / the depth-1 secondary's gen=1
-    /// floor). The reject-older guard compares an incoming generation against
+    /// apply, or when the server is unversioned / pre-watermark). The
+    /// reject-older guard compares an incoming generation against
     /// this to refuse a regression (spec 5f).
     let generation: Int
     /// `true` once any envelope (live or cache) has been applied — gates the
@@ -177,8 +177,9 @@ public actor Store {
 
         // Reject-older install guard (spec 5f, qfg-7h5d.2.x — frontend parity
         // with the backend SDKs). A versioned snapshot strictly older than the
-        // held generation is dropped, so a sequential failover to the depth-1
-        // (generation 1) secondary can't regress an established client. A fresh
+        // held generation is dropped, so a sequential failover to a lagging
+        // (equal-or-lower generation — spec 5f.1, honest counts on both legs)
+        // secondary can't regress an established client. A fresh
         // store installs anything; an unversioned snapshot (generation <= 0 — a
         // pre-watermark server, or an old persisted-cache record) carries no
         // ordering information so it installs anyway (the carve-out, mandatory
@@ -289,7 +290,7 @@ public actor Store {
     }
 
     /// The held `Meta.generation` watermark (0 before the first apply, or when
-    /// the server is unversioned / the depth-1 secondary's gen=1 floor). Read by
+    /// the server is unversioned / pre-watermark). Read by
     /// the reject-older guard and the failover chaos/parity tests. Synchronous,
     /// off-actor.
     public nonisolated var heldGeneration: Int {

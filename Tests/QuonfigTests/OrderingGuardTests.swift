@@ -11,8 +11,9 @@ import XCTest
 ///
 /// Swift v1 stays POLL-ONLY with sequential failover (the parallel hedge is
 /// deferred to v1.x per project/plans/sdk-ios.md §3.3), but the guard matters
-/// even without the hedge: a sequential failover to the depth-1 (generation 1)
-/// secondary would otherwise regress an established client.
+/// even without the hedge: a sequential failover to a lagging (equal-or-lower
+/// generation, spec 5f.1) secondary would otherwise regress an established
+/// client. The fixtures below use gen=1 as the stale leg.
 final class OrderingGuardTests: XCTestCase {
 
     /// A one-flag envelope stamped at `gen` with `feature = value`.
@@ -34,7 +35,7 @@ final class OrderingGuardTests: XCTestCase {
     // MARK: - Store reject-older guard
 
     func testFreshStoreInstallsAnyGeneration() async {
-        // Even the gen=1 secondary floor seeds a fresh client.
+        // Even a low-generation stale leg (gen=1) seeds a fresh client.
         let store = Store()
         let changed = await store.apply(env(gen: 1, true))
         XCTAssertTrue(changed)
@@ -102,7 +103,7 @@ final class OrderingGuardTests: XCTestCase {
         let fp = "fp-alice"
 
         p.save(envelope: env(gen: 42, true), envKey: "ck", fingerprint: fp)
-        // An older versioned save (a failover poll to the gen=1 secondary) must
+        // An older versioned save (a failover poll to a lagging secondary) must
         // NOT regress the cached last-known-good.
         p.save(envelope: env(gen: 41, false), envKey: "ck", fingerprint: fp)
         XCTAssertEqual(
