@@ -15,11 +15,14 @@ Pod::Spec.new do |s|
   s.license          = { :type => "MIT", :file => "LICENSE" }
   s.author           = { "Quonfig" => "support@quonfig.com" }
 
-  # Tag-driven release: the podspec version must match the git tag pushed for the
-  # SPM release (see RELEASING.md). CocoaPods resolves the source from that tag.
+  # Tag-driven release: CocoaPods resolves the source from the git tag, which is
+  # `v`-prefixed (`vX.Y.Z`, per RELEASING.md), while `s.version` is bare (`X.Y.Z`).
+  # So the source tag must be "v#{s.version}" — using s.version.to_s directly looks
+  # for a non-existent bare tag and fails validation with "Remote branch X.Y.Z not
+  # found in upstream origin".
   s.source           = {
     :git => "https://github.com/quonfig/sdk-swift.git",
-    :tag => s.version.to_s
+    :tag => "v#{s.version}"
   }
 
   # Deployment targets match Package.swift (plan §3.4: iOS 15 / macOS 12, Swift
