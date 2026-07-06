@@ -7,9 +7,8 @@ on:
 # Tag-driven release (like sdk-go / sdk-java — no npm gate). The git tag IS the
 # SPM release; consumers resolve `from: "X.Y.Z"` straight from the tag. This
 # workflow does NOT publish anything to a registry — for SPM there is nothing to
-# publish, and CocoaPods `pod trunk push` is a human-gated manual step (see
-# RELEASING.md). All it does is verify the tag is internally consistent, re-run
-# the test gate against the tagged commit, and cut a GitHub Release.
+# publish. All it does is verify the tag is internally consistent, re-run the
+# test gate against the tagged commit, and cut a GitHub Release.
 
 permissions:
   contents: write
@@ -25,18 +24,16 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -n1)"
 
-      # Guard: the tag (vX.Y.Z) must match quonfigVersion in Version.swift AND
-      # s.version in the podspec. A mismatch means a half-bumped release — fail
-      # before anything ships rather than tag X.Y.Z with the code still on the
-      # old version.
-      - name: Verify tag matches source + podspec version
+      # Guard: the tag (vX.Y.Z) must match quonfigVersion in Version.swift. A
+      # mismatch means a half-bumped release — fail before anything ships rather
+      # than tag X.Y.Z with the code still on the old version.
+      - name: Verify tag matches source version
         run: |
           tag="${GITHUB_REF_NAME#v}"
           src=$(grep -oE 'quonfigVersion = "[0-9]+\.[0-9]+\.[0-9]+"' Sources/Quonfig/Version.swift | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-          pod=$(grep -oE 's\.version[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' Quonfig.podspec | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-          echo "tag=$tag version.swift=$src podspec=$pod"
-          if [ "$tag" != "$src" ] || [ "$tag" != "$pod" ]; then
-            echo "::error::Version mismatch — tag '$tag', Version.swift '$src', podspec '$pod' must all match."
+          echo "tag=$tag version.swift=$src"
+          if [ "$tag" != "$src" ]; then
+            echo "::error::Version mismatch — tag '$tag' and Version.swift '$src' must match."
             exit 1
           fi
 
@@ -65,11 +62,6 @@ jobs:
 
       # Cut the GitHub Release from the tag. This is the SPM "publish" — there is
       # no artifact to upload; SPM consumers resolve the tag directly.
-      #
-      # CocoaPods `pod trunk push` is intentionally NOT run here. Publishing to
-      # the public CocoaPods trunk is a production-facing, irreversible release
-      # and is gated on human sign-off (RELEASING.md). A maintainer runs it
-      # manually after this release is cut.
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

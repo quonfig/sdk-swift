@@ -14,10 +14,8 @@ context, caches it, polls for updates, and posts evaluation telemetry. It does
 
 ## Install
 
-### Swift Package Manager (primary)
-
-In Xcode: **File → Add Package Dependencies…** and enter the repo URL, or add
-it to your `Package.swift`:
+Distributed via **Swift Package Manager**. In Xcode: **File → Add Package
+Dependencies…** and enter the repo URL, or add it to your `Package.swift`:
 
 ```swift
 dependencies: [
@@ -34,15 +32,6 @@ targets: [
 ```
 
 Then `import Quonfig`.
-
-### CocoaPods
-
-A `Quonfig` pod will be published alongside the SPM release (legacy but still
-widely used). SPM is the primary, recommended channel.
-
-```ruby
-pod 'Quonfig'
-```
 
 ## Quickstart
 
