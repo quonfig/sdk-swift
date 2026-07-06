@@ -102,6 +102,56 @@ can read a flag without it counting as an exposure for telemetry:
 let v = quonfig.isEnabled("new-checkout", logExposure: false)
 ```
 
+## Logging (`QuonfigLogger`)
+
+Drive a logger's minimum level from a Quonfig `log_level` config, so you can
+raise or lower verbosity from the dashboard **without a redeploy** — the SDK's
+native equivalent of `sdk-go`'s `NewQuonfigHandler` and `@quonfig/node/winston`.
+It's built on Apple's unified logging (`os.Logger`) with **no external
+dependencies**.
+
+```swift
+import Quonfig
+
+let log = QuonfigLogger(quonfig: quonfig, loggerKey: "log-level.my-app")
+
+log.trace("entering render")                 // suppressed unless level <= TRACE
+log.debug("cache warm: \(count) entries")    // suppressed unless level <= DEBUG
+log.info("signed in as \(userID)")
+log.warn("retrying after \(err)")
+log.error("checkout failed: \(err)")
+```
+
+The severity ladder is `TRACE < DEBUG < INFO < WARN < ERROR < FATAL` (the same
+ranks every Quonfig SDK uses). A record emits iff its level is **at or above** the
+configured threshold — e.g. a `log_level` config of `WARN` emits `WARN`/`ERROR`/
+`FATAL` and drops `TRACE`/`DEBUG`/`INFO`. The gate is re-checked on every call, so
+flipping the level live takes effect on the next log line. If no `log_level`
+config resolves, the gate is permissive (logs everything). Message arguments are
+autoclosures, so a suppressed record never builds its string.
+
+Need just the decision (e.g. to gate your own logging framework)?
+
+```swift
+if quonfig.shouldLog(.debug, loggerKey: "log-level.my-app") { /* … */ }
+```
+
+**Custom sink.** By default records go to `os.Logger`. Supply a `QuonfigLogSink`
+to bridge to another backend (or to capture records in a test):
+
+```swift
+struct MySink: QuonfigLogSink {
+    func emit(level: QuonfigLogLevel, message: String) { /* forward anywhere */ }
+}
+let log = QuonfigLogger(quonfig: quonfig, loggerKey: "log-level.my-app", sink: MySink())
+```
+
+> **Frontend note.** Quonfig evaluates server-side, so this client gates against
+> the single threshold the server resolved for its current context. Per-logger
+> overrides (the backend SDKs' per-`quonfig-sdk-logging.key` routing) require
+> on-device evaluation and are not available in a frontend SDK — one `log_level`
+> config drives one threshold for the whole client.
+
 ## Known limitation: offline + context changes (server-side evaluation)
 
 Quonfig evaluates **100% server-side** — the device sends a context and the
