@@ -82,6 +82,19 @@ Manual maintainer steps, once `vX.Y.Z` is tagged and pushed:
    pod trunk push Quonfig.podspec
    ```
 
+   **Needs an iOS simulator.** `pod trunk push` validates by *building* the pod
+   for every declared platform, and the iOS build needs an installed iOS
+   simulator runtime — a fresh Xcode (e.g. Xcode 26) often has none, which fails
+   with `Could not find a 'ios' simulator (valid values: )`. Either install one
+   (`xcodebuild -downloadPlatform iOS`, multi-GB) **or**, since the pod is
+   source-only Swift already validated by SPM + the macOS CI build, skip the
+   build-validation step:
+   ```bash
+   pod trunk push Quonfig.podspec --allow-warnings --skip-import-validation
+   ```
+   Sanity-check the pod compiles without a simulator first:
+   `pod lib lint Quonfig.podspec --platforms=macos --allow-warnings`.
+
 Consumers then add to their `Podfile`:
 
 ```ruby
