@@ -4,7 +4,7 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 `Sources/Quonfig/Version.swift`; a `vX.Y.Z` tag is the release (see
 `RELEASING.md`).
 
-## Unreleased
+## 0.1.0
 
 Telemetry transport policy, mobile subset (qfg-y8je.12). The wire format is
 unchanged; the public API change is additive.

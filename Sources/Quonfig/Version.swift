@@ -5,7 +5,7 @@ import Foundation
 /// Mirrors `sdk-javascript/src/version.ts` (`export default "1.0.0"`). The
 /// other Quonfig SDKs are at 1.0.0; this Apple-platform SDK starts its own
 /// 0.0.x line and graduates to 1.0.0 when it reaches feature parity.
-public let quonfigVersion = "0.0.1"
+public let quonfigVersion = "0.1.0"
 
 /// Library / platform identifier used in the `User-Agent` header.
 ///
