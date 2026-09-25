@@ -18,7 +18,8 @@ final class UserAgentTests: XCTestCase {
     func testUserAgentShape() {
         let ua = quonfigUserAgent()
         // Quonfig-Swift/<version> (<platform> <os-version>)
-        XCTAssertTrue(ua.hasPrefix("Quonfig-Swift/0.0.1 ("))
+        XCTAssertTrue(ua.hasPrefix("Quonfig-Swift/\(quonfigVersion) ("))
+        XCTAssertNotNil(quonfigVersion.range(of: #"^\d+\.\d+\.\d+$"#, options: .regularExpression))
         XCTAssertTrue(ua.hasSuffix(")"))
         XCTAssertTrue(ua.contains(Platform.name))
     }
