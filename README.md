@@ -91,6 +91,60 @@ can read a flag without it counting as an exposure for telemetry:
 let v = quonfig.isEnabled("new-checkout", logExposure: false)
 ```
 
+## Telemetry
+
+The SDK uploads anonymous per-flag evaluation counts (the only thing it sends to
+`api-telemetry`; context shapes and examples are collected server-side). Turn it
+off with `collectEvaluationSummaries: false`. Telemetry never blocks a flag read,
+and a telemetry failure never affects flag evaluation.
+
+How uploads behave (the Quonfig SDK telemetry transport policy, mobile column):
+
+- **One window per tick**, every `telemetryFlushInterval` (default **60s**), and
+  **at most one POST in flight**. A tick that fires while a POST is out is
+  skipped; counts keep aggregating in memory.
+- **Timeout:** a foreground POST gets `telemetryTimeout` (default **15s**) end to
+  end, including connect and TLS.
+- **Retries resend the same bytes.** A window is serialized once and written to
+  an on-disk queue (Application Support, one file per batch) *before* it is
+  POSTed. It is deleted only after a `2xx`, so a window in flight when the app
+  is backgrounded or killed is resent on the next foreground tick or launch,
+  byte for byte. Network errors, timeouts, `408`, `429` and `5xx` are retried no
+  sooner than **30s** later, and not before any `Retry-After` (honored up to
+  **600s**).
+- **Bounded:** the disk queue holds at most `telemetryMaxRetainedBatches`
+  (default **5**) and `telemetryMaxRetainedBytes` (default **512KB**), dropping
+  the oldest; a batch older than `telemetryMaxRetainedAge` (default **5 min**) is
+  discarded when it would be sent; a single batch over the byte cap is never
+  retained. A window holds at most `telemetryMaxEvaluationSummaries` (default
+  **100,000**) distinct flags; new flags past the cap are not counted.
+- **`401`/`403`/`404`:** one ERROR, the queue is deleted, and telemetry is off
+  for the rest of the process (a wrong SDK key or telemetry URL will not fix
+  itself). **Other `4xx`** (`400`, `413`, `422`, ...): that batch is dropped with
+  one ERROR and uploads continue.
+- **Background:** on app background (and `shutdown()`), the live window is
+  written to disk and POSTed once inside a ~**5s** background task
+  (`ProcessInfo.performExpiringActivity`, which also works in app extensions).
+  Older queued batches wait for the next foreground tick.
+
+```swift
+let options = Configuration(
+    sdkKey: "qf_ck_production_…",
+    telemetryFlushInterval: 60,        // seconds
+    telemetryTimeout: 15,              // seconds, foreground POST deadline
+    telemetryMaxRetainedBatches: 5,
+    telemetryMaxRetainedBytes: 524_288,
+    telemetryMaxRetainedAge: 300,      // seconds
+    logSink: nil                       // nil = os.Logger, category "Telemetry"
+)
+```
+
+**Logging** is quiet by design: a failed POST is DEBUG, the first dropped batch
+is one WARN (then at most one WARN summary per 10 min while drops continue),
+recovery is one INFO, and an auth failure is one ERROR. Lines go to `os.Logger`
+(subsystem `com.quonfig.sdk`, category `Telemetry`) unless you pass your own
+`QuonfigLogSink` as `logSink`.
+
 ## Logging (`QuonfigLogger`)
 
 Drive a logger's minimum level from a Quonfig `log_level` config, so you can
