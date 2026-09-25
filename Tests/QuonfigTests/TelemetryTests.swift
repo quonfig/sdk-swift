@@ -10,9 +10,9 @@ import XCTest
 /// Telemetry: the eval-summary aggregator + uploader (qfg-2t2d.8).
 ///
 /// Verifies the exact POST wire shape against the pinned fixture
-/// (`Fixtures/telemetry-post.body.json`, qfg-2t2d.1), the 8s→300s backoff, the
-/// disk-first-then-network background flush, the bounded offline queue, and the
-/// exposure-decoupled read wiring into `Store`.
+/// (`Fixtures/telemetry-post.body.json`, qfg-2t2d.1) and the exposure-decoupled
+/// read wiring into `Store`. The transport policy (retention, caps, status
+/// handling, logging) is in `TelemetryTransportTests`.
 final class TelemetryTests: XCTestCase {
     // MARK: Mock transport
 
@@ -39,20 +39,26 @@ final class TelemetryTests: XCTestCase {
         }
     }
 
-    /// In-memory queue store so tests don't touch the filesystem; records writes.
+    /// In-memory queue store so tests don't touch the filesystem. The disk
+    /// queue itself is covered by `TelemetryTransportTests`.
     final class MemoryQueueStore: TelemetryQueueStore, @unchecked Sendable {
         private let lock = NSLock()
-        private(set) var saved: [[EvaluationSummaries]] = []
-        var seed: [EvaluationSummaries]?
-        func save(_ windows: [EvaluationSummaries]) {
-            lock.lock(); defer { lock.unlock() }
-            saved.append(windows)
+        private var batches: [StoredTelemetryBatch] = []
+        func load() -> [StoredTelemetryBatch] {
+            lock.lock()
+            defer { lock.unlock() }
+            return batches
         }
-        func load() -> [EvaluationSummaries]? {
-            lock.lock(); defer { lock.unlock() }
-            return seed
+        func save(id: String, body: Data) {
+            lock.lock()
+            defer { lock.unlock() }
+            batches.append(StoredTelemetryBatch(id: id, body: body, createdAt: Date()))
         }
-        var lastSaved: [EvaluationSummaries] { lock.lock(); defer { lock.unlock() }; return saved.last ?? [] }
+        func remove(id: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            batches.removeAll { $0.id == id }
+        }
     }
 
     private func makeUploader(_ client: MockClient) -> TelemetryUploader {
@@ -160,60 +166,6 @@ final class TelemetryTests: XCTestCase {
         }
     }
 
-    // MARK: - Backoff 8s -> 300s
-
-    func testBackoffSequence() {
-        var b = ExponentialBackoff(maxDelaySeconds: 300, initialDelaySeconds: 8, multiplier: 2)
-        XCTAssertEqual(b.nextDelaySeconds(), 8)
-        XCTAssertEqual(b.nextDelaySeconds(), 16)
-        XCTAssertEqual(b.nextDelaySeconds(), 32)
-        XCTAssertEqual(b.nextDelaySeconds(), 64)
-        XCTAssertEqual(b.nextDelaySeconds(), 128)
-        XCTAssertEqual(b.nextDelaySeconds(), 256)
-        XCTAssertEqual(b.nextDelaySeconds(), 300)  // capped
-        XCTAssertEqual(b.nextDelaySeconds(), 300)
-        b.reset()
-        XCTAssertEqual(b.nextDelaySeconds(), 8)
-    }
-
-    // MARK: - Offline queue (re-queue + persist on failure)
-
-    func testFailedFlushRequeuesAndPersists() async {
-        let client = MockClient()
-        client.failCount = 1  // first POST fails
-        let store = MemoryQueueStore()
-        let agg = SummaryAggregator(
-            uploader: makeUploader(client), instanceHash: "ih", queueStore: store)
-
-        await agg.record(key: "k", details: details(.bool(true), configType: "feature_flag"))
-        await agg.flush()  // fails -> re-queue + persist
-
-        let queued = await agg.queuedWindowCount
-        XCTAssertEqual(queued, 1, "failed window is re-queued, not dropped")
-        XCTAssertEqual(store.lastSaved.count, 1, "the failed window is persisted to disk")
-
-        // Next flush succeeds and drains the queue.
-        await agg.flush()
-        let after = await agg.queuedWindowCount
-        XCTAssertEqual(after, 0)
-    }
-
-    func testBoundedOfflineQueue() async {
-        let client = MockClient()
-        client.failCount = 1000  // everything fails
-        let store = MemoryQueueStore()
-        let agg = SummaryAggregator(
-            uploader: makeUploader(client), instanceHash: "ih",
-            maxQueuedWindows: 3, queueStore: store)
-
-        for i in 0..<10 {
-            await agg.record(key: "k\(i)", details: details(.int(Int64(i)), configType: "config"))
-            await agg.flush()
-        }
-        let queued = await agg.queuedWindowCount
-        XCTAssertEqual(queued, 3, "offline queue is bounded (oldest dropped)")
-    }
-
     func testBoundedKeys() async {
         let client = MockClient()
         let agg = SummaryAggregator(
@@ -224,47 +176,6 @@ final class TelemetryTests: XCTestCase {
         }
         let live = await agg.liveKeyCount
         XCTAssertEqual(live, 2, "distinct keys capped at maxKeys")
-    }
-
-    // MARK: - Background flush: disk FIRST, then network
-
-    func testFlushOnBackgroundPersistsBeforeNetwork() async {
-        let client = MockClient()
-        let store = MemoryQueueStore()
-        let agg = SummaryAggregator(
-            uploader: makeUploader(client), instanceHash: "ih", queueStore: store)
-        await agg.record(key: "k", details: details(.bool(true), configType: "feature_flag"))
-
-        await agg.flushOnBackground(networkBudgetSeconds: 5)
-
-        // The window must have been written to disk (the durable safety net) — at
-        // least one save happened with the window present, BEFORE the successful
-        // network POST cleared it.
-        XCTAssertGreaterThanOrEqual(store.saved.count, 1, "queue persisted to disk on background")
-        XCTAssertEqual(client.requests.count, 1, "network flush attempted after disk write")
-    }
-
-    func testRestoreFromDiskOnInit() async {
-        let client = MockClient()
-        let store = MemoryQueueStore()
-        store.seed = [
-            EvaluationSummaries(
-                start: 1, end: 2,
-                summaries: [
-                    EvaluationSummary(
-                        key: "restored", type: "feature_flag",
-                        counters: [
-                            EvaluationCounter(
-                                configRowIndex: nil, conditionalValueIndex: nil, configId: "c",
-                                reason: "STATIC", ruleIndex: nil, weightedValueIndex: nil,
-                                selectedValue: .object(["bool": .bool(true)]), count: 9)
-                        ])
-                ])
-        ]
-        let agg = SummaryAggregator(
-            uploader: makeUploader(client), instanceHash: "ih", queueStore: store)
-        let queued = await agg.queuedWindowCount
-        XCTAssertEqual(queued, 1, "persisted windows restored on init (survives suspension)")
     }
 
     // MARK: - Store wiring: exposure decoupled from reads

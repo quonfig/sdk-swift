@@ -76,17 +76,36 @@ struct TelemetryEvents: Sendable, Equatable, Codable {
     var events: [TelemetryEvent]
 }
 
-/// POSTs evaluation summaries to api-telemetry.
+/// The outcome of one telemetry POST that got an HTTP response.
+struct TelemetryPostResult: Sendable, Equatable {
+    var status: Int
+    /// Raw `Retry-After` header, if the server sent one.
+    var retryAfter: String?
+    /// First 200 bytes of the response body (for the rejected-batch ERROR).
+    var bodySnippet: String
+}
+
+/// A telemetry POST that got no HTTP response.
+enum TelemetryTransportError: Error, Sendable, Equatable {
+    /// The overall request deadline passed (P1).
+    case timeout
+    /// The request was cancelled (the flush loop was stopped).
+    case aborted
+    /// Connection, DNS, TLS or other transport failure.
+    case network(String)
+}
+
+/// POSTs serialized telemetry batches to api-telemetry.
 ///
 /// Mirrors `sdk-javascript/src/telemetry/uploader.ts`:
 ///   `POST {telemetryUrl}/api/v1/telemetry/` with HTTP Basic (same client key),
 ///   `Content-Type: application/json`. The Apple SDK additionally sends the
 ///   `User-Agent` it sends on every request (Flagsmith #88) and uses the same
-///   `"u:"`-username Basic header as the loader (frontend key — see `Auth.swift`).
+///   Basic header as the loader (frontend key, see `Auth.swift`).
 ///
-/// Network failure is surfaced to the caller (the aggregator), which re-queues
-/// the window rather than dropping it (the offline-queue bound lives in the
-/// aggregator). The uploader itself holds no state — it just builds + sends.
+/// The uploader sends opaque bytes: the aggregator serializes a window exactly
+/// once and resends those same bytes on a retry (transport policy P5), so the
+/// server's payload-derived dedup token matches. It holds no state.
 public final class TelemetryUploader: Sendable {
     let postURL: URL
     let sdkKey: String
@@ -123,27 +142,74 @@ public final class TelemetryUploader: Sendable {
         return URL(string: "\(s)/api/v1/telemetry/") ?? base
     }
 
-    /// POST one batch. Throws on transport error or non-2xx so the caller can
-    /// re-queue. The 2xx body is ignored (JS reads `.json()` but discards it for
-    /// our purposes).
-    func post(_ events: TelemetryEvents) async throws {
-        let body = try JSONEncoder().encode(events)
+    /// Serialize one window into the POST body. Called once per window; the
+    /// result is what gets retained and resent.
+    static func encode(_ events: TelemetryEvents) throws -> Data {
+        try JSONEncoder().encode(events)
+    }
 
+    /// POST `body` with an overall deadline of `timeout` seconds (P1). Returns
+    /// the status for any HTTP response (the caller classifies it); throws a
+    /// `TelemetryTransportError` when there is no response.
+    ///
+    /// URLSession has no whole-request deadline (`timeoutIntervalForRequest` is
+    /// an idle timeout) and no separate connect-timeout knob, so the deadline is
+    /// a race against a sleep that cancels the request; it bounds connect, TLS
+    /// and the response together.
+    func send(_ body: Data, timeout: TimeInterval) async throws -> TelemetryPostResult {
         var request = URLRequest(url: postURL)
         request.httpMethod = "POST"
         request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = max(timeout, 0.001)
         request.setValue(authHeaderValue(sdkKey: sdkKey), forHTTPHeaderField: "Authorization")
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = body
 
-        let (_, response) = try await client.data(for: request)
+        let client = self.client
+        let finalRequest = request
+        let deadline = UInt64(max(timeout, 0) * 1_000_000_000)
+        return try await withThrowingTaskGroup(of: TelemetryPostResult.self) { group in
+            group.addTask {
+                try await TelemetryUploader.perform(finalRequest, client: client)
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: deadline)
+                throw TelemetryTransportError.timeout
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw TelemetryTransportError.aborted }
+            return first
+        }
+    }
+
+    private static func perform(_ request: URLRequest, client: HTTPClient) async throws -> TelemetryPostResult {
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await client.data(for: request)
+        } catch let error as URLError {
+            switch error.code {
+            case .timedOut: throw TelemetryTransportError.timeout
+            case .cancelled: throw TelemetryTransportError.aborted
+            default: throw TelemetryTransportError.network("URLError \(error.code.rawValue)")
+            }
+        } catch is CancellationError {
+            throw TelemetryTransportError.aborted
+        } catch let error as TelemetryTransportError {
+            throw error
+        } catch {
+            throw TelemetryTransportError.network(String(describing: error))
+        }
         guard let http = response as? HTTPURLResponse else {
-            throw QuonfigLoaderError.nonHTTPResponse
+            throw TelemetryTransportError.network("non-HTTP response")
         }
-        guard (200..<300).contains(http.statusCode) else {
-            throw QuonfigLoaderError.httpStatus(http.statusCode)
-        }
+        let snippet = String(decoding: data.prefix(200), as: UTF8.self)
+        return TelemetryPostResult(
+            status: http.statusCode,
+            retryAfter: http.value(forHTTPHeaderField: "Retry-After"),
+            bodySnippet: snippet
+        )
     }
 }

@@ -17,7 +17,8 @@ import Foundation
 ///   - `Persistence` — versioned no-flicker cache served on cold start and on
 ///     error (qfg-2t2d.5).
 ///   - `SummaryAggregator` + `TelemetryUploader` — per-flag read counters
-///     flushed on a backoff cadence and on background (qfg-2t2d.8).
+///     flushed every 60s and on background, retained on disk (qfg-2t2d.8,
+///     transport policy qfg-y8je.12).
 ///
 /// `initialize` is `async throws` and **resolves once the first envelope is
 /// available** — from the network, or, after a bounded `initTimeout`, from the
@@ -140,9 +141,17 @@ public final class Quonfig: @unchecked Sendable {
         let persistence: Persistence? = Persistence()
         var aggregator: SummaryAggregator?
         if configuration.collectEvaluationSummaries {
+            // The 0.0.1 single-file queue is superseded by the per-batch queue.
+            TelemetryFileQueueStore.removeLegacyQueue()
+            // A fresh instanceHash per launch is fine: retained batches are
+            // resent byte-for-byte, carrying the hash they were built with.
             aggregator = SummaryAggregator(
                 uploader: TelemetryUploader(configuration: configuration),
-                instanceHash: UUID().uuidString)
+                instanceHash: UUID().uuidString,
+                maxKeys: configuration.telemetryMaxEvaluationSummaries,
+                policy: TelemetryTransportPolicy(configuration: configuration),
+                queueStore: TelemetryFileQueueStore(directory: TelemetryFileQueueStore.directory(for: configuration)),
+                logSink: configuration.logSink)
         }
 
         return await make(
@@ -170,7 +179,8 @@ public final class Quonfig: @unchecked Sendable {
         aggregator: SummaryAggregator?,
         lifecycleProvider: LifecycleProvider,
         initTimeout: TimeInterval,
-        fingerprint: @escaping ContextFingerprintFn
+        fingerprint: @escaping ContextFingerprintFn,
+        backgroundTaskRunner: BackgroundTaskRunner = ExpiringActivityRunner()
     ) async -> Quonfig {
         let store = Store()
 
@@ -217,14 +227,20 @@ public final class Quonfig: @unchecked Sendable {
 
         let poller = Poller(fetch: fetch)
 
-        // Background flush hook: on background entry, force-flush + disk-persist
-        // the telemetry queue (disk write before network, §2.8 / Statsig 1.56.0).
+        // Background flush hook (policy P8): inside a ~5s background task, write
+        // the live telemetry window to disk, then POST it once (disk before
+        // network, §2.8 / Statsig 1.56.0). The retained queue is not drained.
         let lifecycle = LifecycleCoordinator(
             provider: lifecycleProvider,
             poller: poller,
             pollInterval: configuration.pollInterval,
             onBackground: { [weak aggregator] in
-                await aggregator?.flushOnBackground()
+                guard let aggregator else { return }
+                await backgroundTaskRunner.run(
+                    reason: "Quonfig telemetry flush", budget: SummaryAggregator.backgroundFlushBudget
+                ) {
+                    await aggregator.flushOnBackground()
+                }
             }
         )
 
@@ -404,13 +420,14 @@ public final class Quonfig: @unchecked Sendable {
 
     // MARK: - Shutdown
 
-    /// Stop polling, stop the telemetry loop (force-flushing one last window), and
-    /// remove the lifecycle observers. Idempotent.
+    /// Stop polling, stop the telemetry loop, give the live telemetry window one
+    /// final POST (written to disk first, ~5s budget; the retained queue is not
+    /// drained), and remove the lifecycle observers. Idempotent.
     public func shutdown() async {
         lifecycle.stop()
         await poller.stop()
-        await aggregator?.flush()
         await aggregator?.stop()
+        await aggregator?.flushOnBackground()
     }
 }
 
