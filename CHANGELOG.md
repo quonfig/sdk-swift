@@ -4,6 +4,31 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 `Sources/Quonfig/Version.swift`; a `vX.Y.Z` tag is the release (see
 `RELEASING.md`).
 
+## Unreleased
+
+New getters (qfg-2agi.14). Additive; next release is a minor bump.
+
+### Added
+
+- **`duration(_:default:logExposure:)`** returns a `duration` config as a
+  `TimeInterval` in seconds. The value must be inside Quonfig's ISO-8601
+  duration grammar (`PT30S`, `PT1H30M`, `P1DT6H2M1.5S`; a fraction only on
+  seconds, at most 9 digits, at most `P36500D`), and is converted with exact
+  decimal arithmetic rounded half up to the millisecond. Absent, wrong type or
+  malformed returns the default; a malformed value logs one warning per key
+  (key only, never the raw value) and `details()` reports reason `.error` with a
+  `nil` value. Tested against the shared grammar fixture
+  `integration-test-data/tests/duration/grammar.yaml` (vendored under
+  `Tests/QuonfigTests/Fixtures`, with a drift check against a sibling checkout).
+- **`stringList(_:default:logExposure:)`** returns a `string_list` config as
+  `[String]`, or the default.
+
+### Changed
+
+- A valid `duration` config now coerces to `.string(<ISO value>)` in
+  `details().value` and `string()` (previously the raw value was carried as
+  `.json(.string(...))` and `string()` returned the default).
+
 ## 0.1.0
 
 Telemetry transport policy, mobile subset (qfg-y8je.12). The wire format is

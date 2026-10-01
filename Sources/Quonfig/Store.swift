@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// A native, typed config value coerced from the wire `WireValue`.
 ///
@@ -148,6 +149,10 @@ public actor Store {
     /// blocks on telemetry (§2.8). `nil` until wired (or when summaries are
     /// disabled via `Configuration.collectEvaluationSummaries`).
     private let exposureBox = ExposureRecorderBox()
+
+    /// Keys already warned about for a malformed duration value (one warning per
+    /// key per client, qfg-2agi.14). Lock-guarded; touched off-actor by reads.
+    private let invalidDurationWarnings = WarnOnceBox()
 
     /// Active subscribers, keyed by token id so cancellation is O(1).
     private var subscribers: [UInt64: @Sendable () -> Void] = [:]
@@ -341,6 +346,21 @@ public actor Store {
         }
     }
 
+    /// String-list value, or the caller-supplied default if absent / wrong type.
+    public nonisolated func stringList(_ key: String, default def: [String]) -> [String] {
+        stringList(key, default: def, logExposure: true)
+    }
+
+    /// Duration value in seconds (`TimeInterval`), or the caller-supplied default.
+    ///
+    /// Only a `duration` config whose stored value is inside the shared ISO-8601
+    /// grammar (`PT30S`, `P1DT6H`, `PT1.5S`, ...; see `parseISODurationMillis`)
+    /// yields a value. Absent, wrong type, or malformed -> the default; a
+    /// malformed value also logs one warning per key.
+    public nonisolated func duration(_ key: String, default def: TimeInterval) -> TimeInterval {
+        duration(key, default: def, logExposure: true)
+    }
+
     /// JSON object value as a Foundation dictionary, or `nil` if absent / not an
     /// object. Mirrors `sdk-javascript`'s `json(key) -> object | undefined`.
     public nonisolated func json(_ key: String) -> [String: Any]? {
@@ -364,10 +384,11 @@ public actor Store {
                 value: nil, reason: .error, ruleIndex: nil, weightedValueIndex: nil,
                 variant: "default", configId: nil, configType: nil)
         }
-        // Older api-delivery builds omit `reason` on the wire; absence -> STATIC
-        // (matches sdk-javascript getDetails fallback).
-        let reason = ev.reason ?? .static
         let value = coerce(ev.value)
+        // Older api-delivery builds omit `reason` on the wire; absence -> STATIC
+        // (matches sdk-javascript getDetails fallback). A malformed duration is
+        // an ERROR (qfg-2agi.14).
+        let reason = (ev.value.type == "duration" && value == nil) ? .error : (ev.reason ?? .static)
         return EvaluationDetails(
             value: value,
             reason: reason,
@@ -419,6 +440,24 @@ public actor Store {
         }
     }
 
+    /// `stringList` without recording an exposure (when `logExposure` is false).
+    public nonisolated func stringList(_ key: String, default def: [String], logExposure: Bool) -> [String] {
+        if case .stringList(let l)? = resolved(key, logExposure: logExposure)?.coerced { return l }
+        return def
+    }
+
+    /// `duration` without recording an exposure (when `logExposure` is false).
+    public nonisolated func duration(_ key: String, default def: TimeInterval, logExposure: Bool) -> TimeInterval {
+        guard let r = resolved(key, logExposure: logExposure), r.evaluation.value.type == "duration" else {
+            return def
+        }
+        if case .string(let s)? = r.coerced, let millis = parseISODurationMillis(s) {
+            return TimeInterval(millis) / 1000
+        }
+        invalidDurationWarnings.warnOnce(key)
+        return def
+    }
+
     // MARK: - Internal coercion
 
     /// A resolved entry plus its coerced native value. `coerced` is computed once
@@ -438,7 +477,7 @@ public actor Store {
         // qfg-2t2d.8: an EXPOSED read records one exposure. The recorder fans to
         // the aggregator actor via a detached Task, so this never blocks the read.
         if logExposure, let recorder = exposureBox.recorder {
-            let reason = ev.reason ?? .static
+            let reason = (ev.value.type == "duration" && coerced == nil) ? .error : (ev.reason ?? .static)
             let details = EvaluationDetails(
                 value: coerced,
                 reason: reason,
@@ -479,6 +518,12 @@ public actor Store {
             if case .int(let i) = v { return .double(Double(i)) }
         case "string", "log_level":
             if case .string(let s) = v { return .string(s) }
+        case "duration":
+            // The stored ISO-8601 string, only when it is inside the grammar
+            // (qfg-2agi.14). A malformed or non-string duration coerces to nil,
+            // so no getter or details() ever surfaces the raw value.
+            if case .string(let s) = v, parseISODurationMillis(s) != nil { return .string(s) }
+            return nil
         case "string_list":
             if case .array(let arr) = v {
                 let strings = arr.compactMap { item -> String? in
@@ -574,6 +619,24 @@ private final class ExposureRecorderBox: @unchecked Sendable {
         set {
             lock.lock(); defer { lock.unlock() }
             _recorder = newValue
+        }
+    }
+}
+
+/// Lock-guarded "warn once per key" set for malformed duration values. The raw
+/// value is never logged, only the key.
+private final class WarnOnceBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var warned: Set<String> = []
+    private let logger = os.Logger(subsystem: "com.quonfig.sdk", category: "Quonfig")
+
+    func warnOnce(_ key: String) {
+        lock.lock()
+        let isNew = warned.insert(key).inserted
+        lock.unlock()
+        if isNew {
+            logger.warning(
+                "Quonfig: config \(key, privacy: .public) has a malformed duration value; returning the default")
         }
     }
 }

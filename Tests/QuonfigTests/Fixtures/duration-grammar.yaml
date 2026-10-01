@@ -1,0 +1,96 @@
+# Shared ISO-8601 duration grammar fixture (qfg-2agi.29).
+#
+# The ONE definition of which duration strings Quonfig accepts and what they
+# mean in milliseconds. Consumed by every writer (app-quonfig, cli, qfg
+# verify), the corpus scan, every backend SDK harness, sdk-javascript,
+# sdk-swift and openfeature-web.
+#
+# Grammar:
+#   ^P(?:\d+D)?(?:T(?:\d+H)?(?:\d+M)?(?:\d+(?:\.\d+)?S)?)?$
+#   plus: at least one component; no dangling T (a T must be followed by at
+#   least one of H/M/S); a fraction ONLY on S, at most 9 fractional digits;
+#   total magnitude <= P36500D.
+# Millis: exact decimal arithmetic (no floats), rounded half up to an
+#   integer millisecond count.
+#
+# Shape:
+#   valid:   list of { value: <string>, millis: <integer> }
+#   invalid: list of <string>
+# Self-check: generators/src/shared/duration-grammar.test.ts
+
+valid:
+  # Zero
+  - { value: "PT0S", millis: 0 }
+  - { value: "P0D", millis: 0 }
+  # Single components
+  - { value: "P1D", millis: 86400000 }
+  - { value: "PT1H", millis: 3600000 }
+  - { value: "PT1M", millis: 60000 }
+  - { value: "PT1S", millis: 1000 }
+  # Leading zero
+  - { value: "PT05S", millis: 5000 }
+  # Non-normalized component values
+  - { value: "PT90S", millis: 90000 }
+  # Combined components
+  - { value: "PT1H30M", millis: 5400000 }
+  - { value: "P1DT6H2M1.5S", millis: 108121500 }
+  # Corpus values (tests/eval/*.yaml after the qfg-2agi.5 rewrite)
+  - { value: "PT30M", millis: 1800000 }
+  - { value: "PT0.2S", millis: 200 }
+  # Fractional seconds and rounding (exact decimal, half up)
+  - { value: "PT1.5S", millis: 1500 }
+  - { value: "PT2.01S", millis: 2010 }
+  - { value: "PT1.005S", millis: 1005 }
+  - { value: "PT0.0005S", millis: 1 }
+  - { value: "PT0.0004S", millis: 0 }
+  - { value: "PT0.123456789S", millis: 123 }
+  - { value: "PT0.999999999S", millis: 1000 }
+  # Magnitude ceiling
+  - { value: "P36500D", millis: 3153600000000 }
+  - { value: "PT876000H", millis: 3153600000000 }
+
+invalid:
+  # Empty / no component / dangling T
+  - ""
+  - "P"
+  - "PT"
+  - "P1DT"
+  # Fractions on anything but S
+  - "PT0.5H"
+  - "PT1.5M"
+  - "P0.5D"
+  # Unsupported designators
+  - "P1W"
+  - "P1Y"
+  - "P1M"
+  # Signs
+  - "-PT5S"
+  - "PT-5S"
+  # Case and whitespace
+  - "pt5s"
+  - " PT5S"
+  - "PT5S "
+  # Malformed fractions
+  - "PT.5S"
+  - "PT5.S"
+  - "PT1,5S"
+  - "PT0.1234567890S"
+  # Order and repetition
+  - "PT5M3H"
+  - "PT5S5S"
+  # Over the magnitude ceiling
+  - "P36501D"
+  - "P36500DT1S"
+  - "PT99999999999999999999S"
+  # Cross-language regex traps: Python/Ruby `$` matches before a trailing
+  # newline, Ruby `^`/`$` match at line boundaries (use \A/\z), and
+  # Python/.NET `\d` matches non-ASCII digits (U+0665 is Arabic-Indic 5).
+  - "PT5S\n"
+  - "garbage\nPT5S"
+  - "PT\u0665S"
+  # Non-ISO shorthands and junk
+  - "30s"
+  - "5m"
+  - "1h30m"
+  - "30"
+  - "garbage"

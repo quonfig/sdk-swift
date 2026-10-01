@@ -353,6 +353,18 @@ public final class Quonfig: @unchecked Sendable {
         store.double(key, default: def, logExposure: logExposure)
     }
 
+    /// String-list value, or the caller-supplied default if absent / wrong type.
+    public func stringList(_ key: String, default def: [String], logExposure: Bool = true) -> [String] {
+        store.stringList(key, default: def, logExposure: logExposure)
+    }
+
+    /// Duration value in seconds, or the caller-supplied default if absent, not a
+    /// duration config, or a value outside the ISO-8601 grammar (`PT30S`,
+    /// `P1DT6H`, `PT1.5S`, ...). A malformed value logs one warning per key.
+    public func duration(_ key: String, default def: TimeInterval, logExposure: Bool = true) -> TimeInterval {
+        store.duration(key, default: def, logExposure: logExposure)
+    }
+
     /// JSON object value, or `nil` if absent / not an object.
     public func json(_ key: String) -> [String: Any]? {
         store.json(key)

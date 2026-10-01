@@ -222,6 +222,30 @@ final class QuonfigClientTests: XCTestCase {
         XCTAssertEqual(q.int("rate-limit", default: 42), 42)
     }
 
+    // MARK: duration + stringList getters (qfg-2agi.14)
+
+    func testDurationAndStringListGetters() async throws {
+        let body = Data(
+            """
+            {"evaluations":{
+              "timeout":{"value":{"type":"duration","value":"P1DT6H2M1.5S"},"configId":"c1",
+                "configType":"config","valueType":"duration","reason":"STATIC"},
+              "bad-timeout":{"value":{"type":"duration","value":"30s"},"configId":"c2",
+                "configType":"config","valueType":"duration","reason":"STATIC"},
+              "hosts":{"value":{"type":"string_list","value":["a","b"]},"configId":"c3",
+                "configType":"config","valueType":"string_list","reason":"STATIC"}
+            },"meta":{"version":"1","environment":"production"}}
+            """.utf8)
+        let mock = MockClient([.init(status: 200, headers: [:], body: body)])
+        let q = await makeClient(mock: mock, context: sampleContext())
+
+        XCTAssertEqual(q.duration("timeout", default: 0), 108_121.5)
+        XCTAssertEqual(q.duration("bad-timeout", default: 9), 9)
+        XCTAssertEqual(q.duration("missing", default: 9, logExposure: false), 9)
+        XCTAssertEqual(q.stringList("hosts", default: []), ["a", "b"])
+        XCTAssertEqual(q.stringList("missing", default: ["z"], logExposure: false), ["z"])
+    }
+
     // MARK: missing SDK key throws
 
     func testInitializeWithoutKeyThrows() async {

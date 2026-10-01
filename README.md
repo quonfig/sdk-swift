@@ -55,6 +55,8 @@ let on    = quonfig.isEnabled("new-checkout")                 // Bool
 let color = quonfig.string("button-color", default: "blue")   // String
 let limit = quonfig.int("rate-limit", default: 100)           // Int
 let cfg   = quonfig.json("pricing")                           // [String: Any]?
+let hosts = quonfig.stringList("allowed-hosts", default: [])  // [String]
+let wait  = quonfig.duration("request-timeout", default: 30)  // TimeInterval (seconds), from ISO-8601 e.g. "PT1.5S"
 let detail = quonfig.details("new-checkout")                  // value + reason + variant
 
 // React to live updates (SwiftUI-friendly — diff-before-notify, so unchanged
