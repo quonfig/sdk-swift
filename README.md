@@ -119,7 +119,7 @@ How uploads behave (the Quonfig SDK telemetry transport policy, mobile column):
   the oldest; a batch older than `telemetryMaxRetainedAge` (default **5 min**) is
   discarded when it would be sent; a single batch over the byte cap is never
   retained. A window holds at most `telemetryMaxEvaluationSummaries` (default
-  **100,000**) distinct flags; new flags past the cap are not counted.
+  **10,000**) distinct flags; new flags past the cap are not counted.
 - **`401`/`403`/`404`:** one ERROR, the queue is deleted, and telemetry is off
   for the rest of the process (a wrong SDK key or telemetry URL will not fix
   itself). **Other `4xx`** (`400`, `413`, `422`, ...): that batch is dropped with

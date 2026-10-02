@@ -89,7 +89,7 @@ public struct Configuration: Sendable {
 
     /// Cap on distinct `{key, type}` evaluation-summary counters in one window.
     /// New keys past the cap are not recorded; existing keys keep counting.
-    /// Default 100,000 (policy P6).
+    /// Default 10,000 (policy P6).
     public var telemetryMaxEvaluationSummaries: Int
 
     /// Where the SDK writes its own diagnostic log lines (telemetry transport

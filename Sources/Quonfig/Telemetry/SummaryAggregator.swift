@@ -72,9 +72,9 @@ struct TelemetryTransportPolicy: Sendable, Equatable {
 /// Distinct counter keys are capped at `maxKeys`; over the cap, new keys are
 /// dropped (existing counts still increment).
 public actor SummaryAggregator {
-    /// Default max distinct counter keys held in one window (JS uses 100k; mobile
-    /// workspaces are ~500 flags, so this is generous headroom while still bounded).
-    public static let defaultMaxKeys = 100_000
+    /// Default max distinct counter keys held in one window. 10,000 matches every
+    /// other Quonfig SDK (P6 uniform cap); mobile workspaces are ~500 flags.
+    public static let defaultMaxKeys = 10_000
 
     /// Default flush interval (one window per tick).
     public static let defaultFlushInterval: TimeInterval = 60

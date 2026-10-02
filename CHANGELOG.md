@@ -28,6 +28,10 @@ New getters (qfg-2agi.14). Additive; next release is a minor bump.
 - A valid `duration` config now coerces to `.string(<ISO value>)` in
   `details().value` and `string()` (previously the raw value was carried as
   `.json(.string(...))` and `string()` returned the default).
+- **`telemetryMaxEvaluationSummaries` now defaults to 10,000** (was 100,000),
+  matching every other Quonfig SDK (policy P6 uniform cap, qfg-6bdw). A window
+  holds at most 10,000 distinct counter keys; new keys past the cap are
+  dropped. Pass a larger value to keep the old bound.
 
 ## 0.1.0
 
