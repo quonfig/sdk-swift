@@ -4,9 +4,10 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 `Sources/Quonfig/Version.swift`; a `vX.Y.Z` tag is the release (see
 `RELEASING.md`).
 
-## Unreleased
+## 0.2.0
 
-New getters (qfg-2agi.14). Additive; next release is a minor bump.
+New getters (qfg-2agi.14), additive; telemetry summary cap default aligned to
+10,000 (qfg-6bdw).
 
 ### Added
 
