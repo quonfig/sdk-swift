@@ -175,13 +175,22 @@ public struct Configuration: Sendable {
     }
 }
 
+/// The longest sleep `sleepNanoseconds` returns: about 100 years.
+///
+/// It must stay well inside `Int64`, not just `UInt64`. Older Darwin
+/// concurrency runtimes (the macOS 15 one, for example) hand the count to
+/// `dispatch_time`'s signed delta, so `UInt64.max` became -1 ns and an
+/// "infinite" sleep woke at once. 100 years plus the current uptime is far
+/// from that overflow.
+let maxSleepNanoseconds: UInt64 = 100 * 365 * 86_400 * 1_000_000_000
+
 /// Seconds to `Task.sleep` nanoseconds, clamped so a configured interval can
-/// never trap the conversion: NaN or a non-positive value is 0, and anything
-/// past `UInt64.max` nanoseconds (`.infinity`, used to mean "effectively
-/// never") is `UInt64.max` (about 584 years).
+/// never trap the conversion or overflow the runtime's deadline: NaN or a
+/// non-positive value is 0, and anything longer than `maxSleepNanoseconds`
+/// (`.infinity`, used to mean "effectively never") is `maxSleepNanoseconds`.
 func sleepNanoseconds(_ seconds: TimeInterval) -> UInt64 {
     guard seconds > 0 else { return 0 }
     let nanos = seconds * 1_000_000_000
-    guard nanos < Double(UInt64.max) else { return UInt64.max }
+    guard nanos < Double(maxSleepNanoseconds) else { return maxSleepNanoseconds }
     return UInt64(nanos)
 }

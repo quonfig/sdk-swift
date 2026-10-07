@@ -43,8 +43,10 @@ behavior changes and fit in the same minor.
   `JSON.stringify` does, with a debug log naming the attribute.
 - **Infinite intervals trapped.** `initTimeout: .infinity`, or an infinite
   `telemetryFlushInterval` / `telemetryTimeout`, overflowed the nanosecond
-  conversion and crashed. They are now clamped (about 584 years), so they mean
-  "wait as long as possible".
+  conversion and crashed. They are now clamped to about 100 years, so they mean
+  "wait as long as possible". The clamp stays well inside `Int64` because the
+  macOS 15 concurrency runtime reads a sleep longer than `Int64.max`
+  nanoseconds as negative and wakes at once.
 - **macOS stopped polling whenever the app lost focus.** Resigning active was
   treated as entering the background, so the poll timer stopped (and telemetry
   flushed) every time another app became frontmost; menu-bar apps and windows

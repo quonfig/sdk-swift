@@ -239,8 +239,32 @@ final class QuonfigClientTests: XCTestCase {
         XCTAssertEqual(sleepNanoseconds(0), 0)
         XCTAssertEqual(sleepNanoseconds(-3), 0)
         XCTAssertEqual(sleepNanoseconds(.nan), 0)
-        XCTAssertEqual(sleepNanoseconds(.infinity), UInt64.max)
-        XCTAssertEqual(sleepNanoseconds(1e300), UInt64.max)
+        // The clamp must stay well inside Int64: older Darwin concurrency
+        // runtimes (macOS 15) pass the count to dispatch_time's signed delta,
+        // so UInt64.max became -1 ns and the "infinite" sleep woke at once.
+        XCTAssertLessThanOrEqual(sleepNanoseconds(.infinity), UInt64(Int64.max / 2))
+        XCTAssertLessThanOrEqual(sleepNanoseconds(1e300), UInt64(Int64.max / 2))
+        XCTAssertEqual(sleepNanoseconds(.infinity), maxSleepNanoseconds)
+        XCTAssertEqual(sleepNanoseconds(1e300), maxSleepNanoseconds)
+        XCTAssertGreaterThan(sleepNanoseconds(.infinity), 1_000_000_000 * 86_400 * 365 * 50)
+    }
+
+    /// An "infinite" sleep must not fire early. On the macOS 15 concurrency
+    /// runtime a `UInt64.max` sleep woke immediately, so `initTimeout: .infinity`
+    /// and an infinite `telemetryTimeout` timed out at once.
+    func testInfiniteSleepDoesNotFireEarly() async throws {
+        let sleeper = Task { () -> Bool in
+            do {
+                try await Task.sleep(nanoseconds: sleepNanoseconds(.infinity))
+                return true  // woke on its own: fired early
+            } catch {
+                return false  // cancelled, as expected
+            }
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        sleeper.cancel()
+        let firedEarly = await sleeper.value
+        XCTAssertFalse(firedEarly, "an infinite sleep woke on its own instead of waiting")
     }
 
     // MARK: duration + stringList getters (qfg-2agi.14)
