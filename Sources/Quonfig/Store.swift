@@ -257,7 +257,9 @@ public actor Store {
     /// Apply a fetch result only if it was built for the current context
     /// (`contextTag` is the fingerprint of the context the request carried).
     /// Returns `false`, installing nothing, for a result that belongs to a
-    /// context the client has since switched away from. The check and the
+    /// context the client has since switched away from. Returns `true` for a
+    /// current-context result, even if the reject-older guard then refuses it
+    /// (that refusal is within one context's stream). The check and the
     /// install run in one actor turn, so a concurrent `resetForContextSwitch`
     /// cannot slip between them.
     func applyIfCurrent(_ result: LoaderResult, contextTag tag: String) -> Bool {
@@ -272,16 +274,26 @@ public actor Store {
     /// generation watermark are dropped, so the reject-older guard only ever
     /// compares generations within one context's stream. Subscribers are
     /// notified when the resolved values change.
+    ///
+    /// A no-op when `tag` is already the current context (an app re-identifying
+    /// the same user): the held snapshot already belongs to it, and the cache
+    /// may lag memory (a failed `Persistence.save`), so reinstalling from disk
+    /// could flash defaults.
     func resetForContextSwitch(to cached: EvalEnvelope?, contextTag tag: String) {
+        guard contextTag != tag else { return }
         contextTag = tag
         let envelope =
             cached ?? EvalEnvelope(evaluations: [:], meta: EvalMeta(version: "", environment: ""))
         install(envelope, rejectOlder: false)
     }
 
-    /// Pull one envelope from the loader and apply it. The store-side half of the
-    /// loader<->store wiring: the polling loop (qfg-2t2d.6) calls this each tick.
-    /// Returns whether the applied envelope changed the resolved values.
+    /// Pull one envelope from the loader and apply it. Returns whether the
+    /// applied envelope changed the resolved values.
+    ///
+    /// This does no context check: it applies whatever the loader returns. The
+    /// `Quonfig` client does not use it; its polls go through a step that
+    /// discards a result fetched for a context it has since switched away from
+    /// (qfg-goi1.2.3).
     @discardableResult
     public func refresh(using loader: Loader) async throws -> Bool {
         let result = try await loader.load()

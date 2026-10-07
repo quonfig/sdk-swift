@@ -33,8 +33,9 @@ import Foundation
 ///     can't clobber the new one. (Statsig #1/#36)
 ///
 /// The poller is transport-agnostic: it's handed a `@Sendable` async `fetch`
-/// closure (the `Quonfig` client wires this to `Store.refresh(using:)`), so this
-/// file has no knowledge of `Loader`/`Store` wiring and is trivially testable.
+/// closure (the `Quonfig` client wires this to a context-checked
+/// fetch-apply-persist step), so this file has no knowledge of `Loader`/`Store`
+/// wiring and is trivially testable.
 public actor Poller {
     /// The work one tick performs. Supplied by the client; throwing is tolerated
     /// (a failed poll is logged-and-skipped, the timer keeps running).
@@ -113,8 +114,10 @@ public actor Poller {
         t.resume()
     }
 
-    /// Stop polling. Cancels the dispatch source on its own queue (Statsig #29)
-    /// and bumps the generation so any in-flight fetch's result is discarded.
+    /// Stop polling. Cancels the dispatch source on its own queue (Statsig #29),
+    /// bumps the generation so timer ticks scheduled before the stop are
+    /// ignored, and drops any armed follow-up. An in-flight fetch still runs to
+    /// completion; judging its result is the fetch closure's job.
     public func stop() {
         generation &+= 1
         pendingFollowUp = false

@@ -194,9 +194,96 @@ final class ContextSwitchTests: XCTestCase {
         XCTAssertEqual(
             q.string("who", default: "default"), "bob",
             "store should serve bob's values after updateContext(bob)")
-        XCTAssertNotEqual(
-            persistedWho(persistence, bob), "alice",
-            "alice's values must never be persisted under bob's fingerprint")
+        XCTAssertEqual(
+            persistedWho(persistence, bob), "bob",
+            "bob's cache entry must hold bob's own refetched values, never alice's")
+        XCTAssertEqual(
+            persistedWho(persistence, alice), "alice",
+            "alice's own cache entry must still hold alice's values")
+        await q.shutdown()
+    }
+
+    // MARK: - Overlapping switches: a held refetch must not block the next switch
+
+    func testSecondUpdateContextIsNotBlockedByFirstSwitchsRefetch() async throws {
+        let alice = user("alice")
+        let bob = user("bob")
+        let carol = user("carol")
+        let mock = ContextMockClient()
+        try mock.route(alice, who: "alice", gen: 10)
+        try mock.route(bob, who: "bob", gen: 10)
+        try mock.route(carol, who: "carol", gen: 10)
+        let persistence = Persistence(store: InMemoryFallbackStore())
+        persistence.save(
+            envelope: Self.envelope(who: "carol-cached", gen: 10), envKey: envKey,
+            fingerprint: defaultContextFingerprint(carol))
+
+        let q = await makeClient(mock: mock, context: alice, persistence: persistence)
+        XCTAssertEqual(q.string("who", default: "default"), "alice")
+
+        // Switch to bob; bob's refetch hangs (a slow login fetch).
+        let gate = mock.hold("bob")
+        let switchBob = Task { try await q.updateContext(bob) }
+        let bobInFlight = await eventually { mock.requests.contains("bob") }
+        XCTAssertTrue(bobInFlight, "bob's refetch should be in flight")
+
+        // A second switch (e.g. logout to carol) must take effect at once, not
+        // wait behind bob's in-flight refetch.
+        let switchCarol = Task { try await q.updateContext(carol) }
+        let switched = await eventually(timeout: 1) {
+            q.string("who", default: "default") == "carol-cached"
+        }
+        XCTAssertTrue(switched, "updateContext(carol) must not wait behind bob's held refetch")
+        XCTAssertEqual(q.string("who", default: "default"), "carol-cached")
+        XCTAssertEqual(
+            defaultContextFingerprint(q.context), defaultContextFingerprint(carol),
+            "the client's context must already be carol")
+
+        // bob's stale refetch lands: it is discarded, and carol's refetch runs.
+        await gate.release()
+        try await switchBob.value
+        try await switchCarol.value
+        await eventually { q.string("who", default: "default") == "carol" }
+        XCTAssertEqual(q.string("who", default: "default"), "carol")
+        XCTAssertEqual(persistedWho(persistence, carol), "carol")
+        await q.shutdown()
+    }
+
+    // MARK: - Same-context updateContext keeps serving the current values
+
+    /// A persistence store whose writes silently fail (the `try?` paths in
+    /// `Persistence.save`), so the disk never holds what memory holds.
+    final class DroppingStore: PersistenceStore, @unchecked Sendable {
+        func write(key: String, data: Data, inline: Bool) {}
+        func read(key: String, inline: Bool) -> Data? { nil }
+        func remove(key: String, inline: Bool) {}
+        func writeIndex(_ data: Data) {}
+        func readIndex() -> Data? { nil }
+        func removeIndex() {}
+    }
+
+    func testSameContextUpdateContextKeepsCurrentValues() async throws {
+        let alice = user("alice")
+        let mock = ContextMockClient()
+        try mock.route(alice, who: "alice", gen: 10)
+        let persistence = Persistence(store: DroppingStore())
+
+        let q = await makeClient(mock: mock, context: alice, persistence: persistence)
+        XCTAssertEqual(q.string("who", default: "default"), "alice")
+        XCTAssertNil(persistedWho(persistence, alice), "precondition: the save failed")
+
+        // Re-identify the same user while the refetch is held.
+        let gate = mock.hold("alice")
+        let reidentify = Task { try await q.updateContext(alice) }
+        let refetching = await eventually { mock.requests.filter { $0 == "alice" }.count == 2 }
+        XCTAssertTrue(refetching, "the same-context refetch should be in flight")
+        XCTAssertEqual(
+            q.string("who", default: "default"), "alice",
+            "re-identifying the same context must keep its current values, not flash defaults")
+
+        await gate.release()
+        try await reidentify.value
+        XCTAssertEqual(q.string("who", default: "default"), "alice")
         await q.shutdown()
     }
 

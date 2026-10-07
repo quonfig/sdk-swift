@@ -268,7 +268,10 @@ public final class Quonfig: @unchecked Sendable {
     /// persist it under that context's fingerprint, but only while that context
     /// is still the client's current one (qfg-goi1.2.3). A result for a context
     /// that `updateContext` has since switched away from is discarded: it is
-    /// neither served nor written to any cache. Returns whether it was applied.
+    /// neither served nor written to any cache. Returns `false` for such a
+    /// discarded result. A current-context result is persisted even when the
+    /// store's reject-older guard refuses it; `Persistence.save` applies the same
+    /// generation watermark, so the disk cache never moves backwards.
     @discardableResult
     static func fetchApplyPersist(
         loader: Loader,
@@ -407,25 +410,32 @@ public final class Quonfig: @unchecked Sendable {
     /// flight is discarded when it lands, never served or persisted under the
     /// new context (qfg-goi1.2.3).
     public func updateContext(_ context: QuonfigContext) async throws {
-        await contextSwitchLock.acquire()
         let fp = fingerprintFn(context)
 
-        contextBox.value = context
+        // The switch itself (context, loader, store) is serialized, so two
+        // overlapping calls cannot leave the loader on one context and the store
+        // tagged with another. The lock covers only these in-memory steps, never
+        // the network refetch below: a second switch (a logout, say) must not
+        // wait behind the first switch's slow fetch.
+        await contextSwitchLock.withLock {
+            self.contextBox.value = context
 
-        // Point the loader at the new context BEFORE refetching.
-        await loader.updateContext(context)
+            // Point the loader at the new context BEFORE refetching.
+            await self.loader.updateContext(context)
 
-        // Serve the new context's cached envelope, or caller defaults, right away
-        // (§2.7). Unconditional: the held generation watermark belongs to the
-        // previous context, so the reject-older guard must not compare against it.
-        await store.resetForContextSwitch(
-            to: persistence?.load(envKey: envKey, fingerprint: fp), contextTag: fp)
+            // Serve the new context's cached envelope, or caller defaults, right
+            // away (§2.7). Unconditional: the held generation watermark belongs to
+            // the previous context, so the reject-older guard must not compare
+            // against it. A no-op when `fp` is already the current context.
+            await self.store.resetForContextSwitch(
+                to: self.persistence?.load(envKey: self.envKey, fingerprint: fp), contextTag: fp)
+        }
 
         // Immediate refetch for the new context. If a fetch for the old context
         // is in flight, the refetch runs as soon as it lands. The fetch closure
-        // persists the freshly-resolved envelope itself.
+        // reads the loader's current context and checks the store's tag itself,
+        // so it needs no lock, and persists the freshly-resolved envelope.
         await poller.updateContext()
-        await contextSwitchLock.release()
     }
 
     /// The current evaluation context (thread-safe read).
@@ -462,8 +472,8 @@ public enum QuonfigInitError: Error, Sendable, Equatable {
 }
 
 /// A FIFO async mutex. Actors are reentrant across `await`, so an actor method
-/// alone cannot keep a multi-step `updateContext` atomic; callers `acquire()`
-/// before the first step and `release()` after the last.
+/// alone cannot keep a multi-step `updateContext` atomic; callers run the steps
+/// inside `withLock`, which always releases, even when the body throws.
 final actor AsyncSerialLock {
     private var held = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -474,6 +484,14 @@ final actor AsyncSerialLock {
             return
         }
         await withCheckedContinuation { waiters.append($0) }
+    }
+
+    /// Run `body` while holding the lock. The lock is released on every exit
+    /// path, including a throw.
+    func withLock<T: Sendable>(_ body: @Sendable () async throws -> T) async rethrows -> T {
+        await acquire()
+        defer { release() }
+        return try await body()
     }
 
     func release() {
