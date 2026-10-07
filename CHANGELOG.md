@@ -6,7 +6,33 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 
 ## Unreleased
 
-Semver: none (CI and test-only; no published artifact changes, no release needed).
+Semver: **minor** (0.3.0). The context-switch fix below changes what getters
+return in the window between `updateContext` and its refetch, and while offline
+after a switch. The value after a successful refetch is unchanged.
+
+### Fixed
+
+- **`updateContext` could serve and cache the previous user's values under the
+  new user (qfg-goi1.2.3).** If a poll for the old context was in flight when
+  `updateContext` ran, the old result was applied when it landed and saved to
+  disk under the new context's cache key, and the refetch for the new context
+  was dropped (it ran only at the next timer tick). Each fetch is now tagged
+  with the context it was built for. A result for a context that is no longer
+  current is discarded, neither served nor persisted, and the new context's
+  refetch runs as soon as the old fetch lands. The init fetch goes through the
+  same check.
+- **Offline `updateContext` kept the previous user's values on screen.** The
+  reject-older generation guard compared the new context's cached envelope with
+  the previous context's generation and refused it when the cache was older.
+  `updateContext` now resets the store for the new context. It serves that
+  context's cached envelope unconditionally, or caller defaults when there is
+  none, as the README's "Known limitation" section already describes. The
+  generation guard now applies only within one context.
+
+Upgrade note: switching to a context the device has never seen now returns your
+caller-supplied defaults until its refetch lands. Before, it briefly returned the
+previous user's values. Subscribers are notified for the switch itself and again
+when the refetch changes values.
 
 ### Internal
 

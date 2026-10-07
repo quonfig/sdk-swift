@@ -81,6 +81,10 @@ Notes:
 - The SDK **polls** (default 60s foreground) with `ETag`/`If-None-Match` so an
   unchanged flag set is a cheap `304`. It refetches immediately on app foreground
   and on `updateContext`, and suspends polling in the background.
+- `updateContext` stops serving the previous context's values at once: until
+  the refetch lands you get the new context's cached values (if it was seen
+  before) or your caller-supplied defaults, never the previous user's values. A
+  fetch for the previous context that is still in flight is discarded.
 - Use the **client/frontend SDK key** (the same key type the JavaScript/React
   SDKs use) — a mobile binary is extractable, so never embed a backend key.
 
