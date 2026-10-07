@@ -29,10 +29,32 @@ after a switch. The value after a successful refetch is unchanged.
   none, as the README's "Known limitation" section already describes. The
   generation guard now applies only within one context.
 
-Upgrade note: switching to a context the device has never seen now returns your
-caller-supplied defaults until its refetch lands. Before, it briefly returned the
-previous user's values. Subscribers are notified for the switch itself and again
-when the refetch changes values.
+### Changed
+
+- **`updateContext` steps are serialized; the refetch is not.** Overlapping
+  `updateContext` calls apply their context, loader and store switch one at a
+  time, so the loader and the store always agree on the current context. The
+  network refetch runs outside that critical section, so a second switch (a
+  logout, say) takes effect at once instead of waiting behind the first
+  switch's slow fetch.
+- **Re-identifying the same context is a no-op for the store.** `updateContext`
+  with a context whose fingerprint matches the current one keeps serving the
+  current values while it refetches.
+- **`Poller` (public actor) contract.** `Poller.updateContext()` now restarts
+  the timer before it runs the refetch, and a follow-up fetch armed after the
+  latest generation bump always runs; the poller no longer drops it when the
+  generation changed while a fetch was in flight. `stop()` still drops any armed
+  follow-up. The poller never judged fetch results; the client's fetch closure
+  discards a result for a context that is no longer current.
+
+Upgrade note: switching to a context the device has never seen (for example the
+first login of a new user on a device) now returns your caller-supplied defaults
+until its refetch lands. Before, it returned the previous user's values in that
+window. Subscribers and SwiftUI bindings therefore see two changes on such a
+switch: previous values to defaults, then defaults to the new values. Before,
+they saw one. The old `updateContext` doc comment's promise that the UI "doesn't
+flicker defaults during the refetch" is removed. A previously-seen context
+switches straight to its cached values, with no defaults in between.
 
 ### Internal
 
