@@ -54,10 +54,13 @@ public struct Configuration: Sendable {
     /// pattern).
     public var sessionConfiguration: URLSessionConfiguration
 
-    /// Per-request timeout. Applied to `sessionConfiguration` if non-nil.
+    /// Per-request (idle) timeout. Applied to `sessionConfiguration` if non-nil.
+    /// The default session uses 10s.
     public var requestTimeout: TimeInterval?
 
-    /// Resource timeout. Applied to `sessionConfiguration` if non-nil.
+    /// Resource (end-to-end) timeout. Applied to `sessionConfiguration` if
+    /// non-nil. The default session uses 30s. It applies to telemetry POSTs
+    /// too, so keep it above `telemetryTimeout`.
     public var resourceTimeout: TimeInterval?
 
     /// Extra headers recomputed **per request** (proxy auth tokens rotate —
@@ -146,13 +149,28 @@ public struct Configuration: Sendable {
         self.logSink = logSink
     }
 
+    /// Default idle timeout for a request on the default session: how long a
+    /// task waits for more data. Bounds how long a blackholed primary holds a
+    /// poll before failover to the next API URL.
+    static let defaultRequestTimeout: TimeInterval = 10
+
+    /// Default end-to-end limit for a task on the default session, so a
+    /// slow-drip response cannot hold the poller's single in-flight fetch
+    /// forever. It caps telemetry POSTs too (same session), so it stays above
+    /// the telemetry deadline (`SummaryAggregator.defaultTimeout`, 15s).
+    static let defaultResourceTimeout: TimeInterval = 30
+
     /// Ephemeral session config with the URL cache disabled, per §2.3 — the
     /// eval URL carries the (possibly PII-bearing) context in its path, so it
-    /// must never be persisted by `URLCache`.
+    /// must never be persisted by `URLCache`. Request and resource timeouts are
+    /// bounded (URLSession's own defaults are 60s idle and 7 days per task);
+    /// `requestTimeout` / `resourceTimeout` override them.
     static func defaultSessionConfiguration() -> URLSessionConfiguration {
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.timeoutIntervalForRequest = defaultRequestTimeout
+        config.timeoutIntervalForResource = defaultResourceTimeout
         return config
     }
 }

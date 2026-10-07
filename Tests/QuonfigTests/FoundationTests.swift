@@ -74,6 +74,24 @@ final class ConfigurationTests: XCTestCase {
         XCTAssertEqual(cfg.sessionConfiguration.timeoutIntervalForResource, 30)
     }
 
+    /// F5 (qfg-goi1.2.17): the default session used to keep URLSession's
+    /// defaults (60s idle, 7-day resource), so a blackholed primary held each
+    /// poll for 60s before failover and a slow-drip response never ended. The
+    /// default session now bounds both; caller overrides still win.
+    func testDefaultSessionHasRequestAndResourceTimeouts() {
+        let cfg = Configuration(sdkKey: "k")
+        XCTAssertEqual(cfg.sessionConfiguration.timeoutIntervalForRequest, 10)
+        XCTAssertEqual(cfg.sessionConfiguration.timeoutIntervalForResource, 30)
+        // The resource timeout caps every task on the session, telemetry POSTs
+        // included, so it must stay above the telemetry deadline.
+        XCTAssertGreaterThan(
+            cfg.sessionConfiguration.timeoutIntervalForResource, SummaryAggregator.defaultTimeout)
+
+        let overridden = Configuration(sdkKey: "k", requestTimeout: 4, resourceTimeout: 45)
+        XCTAssertEqual(overridden.sessionConfiguration.timeoutIntervalForRequest, 4)
+        XCTAssertEqual(overridden.sessionConfiguration.timeoutIntervalForResource, 45)
+    }
+
     func testCustomHeadersRecomputed() {
         let counter = HeaderCounter()
         let cfg = Configuration(sdkKey: "k", customHeaders: { ["X-Seq": "\(counter.next())"] })
