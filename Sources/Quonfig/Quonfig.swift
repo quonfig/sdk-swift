@@ -392,7 +392,8 @@ public final class Quonfig: @unchecked Sendable {
     /// React to live updates (SwiftUI-friendly). The closure fires after every
     /// *change* to the resolved envelope (diff-before-notify, so unchanged polls
     /// don't churn). Returns a token; cancel it (or drop it) to unsubscribe.
-    @discardableResult
+    /// Hold the token for as long as you want updates: a discarded token
+    /// unsubscribes at once, so the compiler warns on an unused result.
     public func subscribe(_ listener: @escaping @Sendable () -> Void) async -> SubscriptionToken {
         await store.subscribe(listener)
     }
