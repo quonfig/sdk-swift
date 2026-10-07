@@ -173,6 +173,10 @@ public actor Loader {
     /// `Context.encodedPathSegment()` (base64url + RFC 3986 unreserved percent
     /// encoding — `+` never passes).
     func url(apiURL: URL) throws -> URL {
+        try url(apiURL: apiURL, context: context)
+    }
+
+    private func url(apiURL: URL, context: QuonfigContext) throws -> URL {
         let encoded = try context.encodedPathSegment()
         // Trim a trailing slash on the base (loader.ts does `.replace(/\/$/, "")`).
         var base = apiURL.absoluteString
@@ -189,10 +193,22 @@ public actor Loader {
     /// Load the envelope, trying each API URL in order (failover) and returning
     /// the first success. Mirrors `loader.ts` `loadWithFailover`.
     public func load() async throws -> LoaderResult {
+        try await loadForCurrentContext().result
+    }
+
+    /// `load()`, plus the context the request was built for (qfg-goi1.2.3).
+    ///
+    /// The context is read once, before the first await, and used for every
+    /// failover leg. An `updateContext` that lands while this request is in
+    /// flight therefore cannot change which identity the result belongs to, and
+    /// the client compares the returned context with its current one before it
+    /// installs or persists the result.
+    func loadForCurrentContext() async throws -> (context: QuonfigContext, result: LoaderResult) {
+        let context = self.context
         var lastError: Error?
         for apiURL in apiURLs {
             do {
-                return try await fetch(from: apiURL)
+                return (context, try await fetch(from: apiURL, context: context))
             } catch {
                 lastError = error
             }
@@ -201,8 +217,8 @@ public actor Loader {
         throw QuonfigLoaderError.allURLsFailed(message)
     }
 
-    private func fetch(from apiURL: URL) async throws -> LoaderResult {
-        let url = try url(apiURL: apiURL)
+    private func fetch(from apiURL: URL, context: QuonfigContext) async throws -> LoaderResult {
+        let url = try url(apiURL: apiURL, context: context)
         let key = url.absoluteString
 
         var request = URLRequest(url: url)

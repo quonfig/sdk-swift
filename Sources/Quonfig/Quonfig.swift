@@ -35,11 +35,9 @@ public final class Quonfig: @unchecked Sendable {
     private let aggregator: SummaryAggregator?
     private let fingerprintFn: ContextFingerprintFn
 
-    /// The cache key + fingerprint the poller's persist step writes under. Updated
-    /// by `updateContext` so a post-switch poll persists under the NEW context's
-    /// fingerprint, not the old one. Shared by reference with the poller's fetch
-    /// closure built in `initialize`.
-    private let fingerprintBox: FingerprintBox
+    /// Serializes `updateContext` calls, so two overlapping switches cannot leave
+    /// the loader on one context and the store tagged with another.
+    private let contextSwitchLock = AsyncSerialLock()
 
     /// Cache namespace for `(envKey, contextFingerprint)` — distinguishes this
     /// client's SDK key / environment so two clients in one process never collide.
@@ -65,8 +63,7 @@ public final class Quonfig: @unchecked Sendable {
         lifecycle: LifecycleCoordinator,
         persistence: Persistence?,
         aggregator: SummaryAggregator?,
-        fingerprintFn: @escaping ContextFingerprintFn,
-        fingerprintBox: FingerprintBox
+        fingerprintFn: @escaping ContextFingerprintFn
     ) {
         self.configuration = configuration
         self.contextBox = ContextBox(context)
@@ -77,7 +74,6 @@ public final class Quonfig: @unchecked Sendable {
         self.persistence = persistence
         self.aggregator = aggregator
         self.fingerprintFn = fingerprintFn
-        self.fingerprintBox = fingerprintBox
         self.envKey = Quonfig.envKey(for: configuration)
     }
 
@@ -198,6 +194,7 @@ public final class Quonfig: @unchecked Sendable {
 
         let envKey = Quonfig.envKey(for: configuration)
         let initialFingerprint = fingerprint(context)
+        await store.setContextTag(initialFingerprint)
 
         // 1. Cold-start: serve the cached envelope for this context synchronously
         //    (no flicker) before the network returns (§2.7).
@@ -205,24 +202,15 @@ public final class Quonfig: @unchecked Sendable {
             await store.apply(cached)
         }
 
-        // The poller's fetch closure pulls one envelope through the loader and
-        // applies + persists it. It reads context/fingerprint fresh from the
-        // client each tick (never captures a snapshot) so updateContext is honored
-        // (Unleash #68). Built before `client` exists, so it captures the
-        // collaborators directly and re-derives the fingerprint via the loader's
-        // current context through a boxed reference set just below.
-        let fingerprintBox = FingerprintBox(envKey: envKey, fingerprint: initialFingerprint)
+        // The poller's fetch closure pulls one envelope through the loader for
+        // the loader's current context (never a captured snapshot, so
+        // updateContext is honored, Unleash #68), then applies + persists it only
+        // if that context is still current (qfg-goi1.2.3).
         let fetch: Poller.Fetch = { [weak store, weak persistence] in
             guard let store else { return }
-            let result = try await loader.load()
-            await store.apply(loaderResult: result)
-            // Persist the fresh (or 304-confirmed) envelope under the CURRENT
-            // fingerprint so a later cold start / serve-on-error has it.
-            persistence?.save(
-                envelope: result.envelope,
-                envKey: fingerprintBox.envKey,
-                fingerprint: fingerprintBox.fingerprint
-            )
+            try await fetchApplyPersist(
+                loader: loader, store: store, persistence: persistence, envKey: envKey,
+                fingerprint: fingerprint)
         }
 
         let poller = Poller(fetch: fetch)
@@ -253,8 +241,7 @@ public final class Quonfig: @unchecked Sendable {
             lifecycle: lifecycle,
             persistence: persistence,
             aggregator: aggregator,
-            fingerprintFn: fingerprint,
-            fingerprintBox: fingerprintBox
+            fingerprintFn: fingerprint
         )
 
         // 2. Race the first fetch against the bounded init timeout. Whichever
@@ -266,7 +253,6 @@ public final class Quonfig: @unchecked Sendable {
             store: store,
             persistence: persistence,
             envKey: envKey,
-            fingerprint: initialFingerprint,
             timeout: initTimeout
         )
 
@@ -278,6 +264,29 @@ public final class Quonfig: @unchecked Sendable {
         return client
     }
 
+    /// Fetch one envelope for the loader's current context, then apply it and
+    /// persist it under that context's fingerprint, but only while that context
+    /// is still the client's current one (qfg-goi1.2.3). A result for a context
+    /// that `updateContext` has since switched away from is discarded: it is
+    /// neither served nor written to any cache. Returns whether it was applied.
+    @discardableResult
+    static func fetchApplyPersist(
+        loader: Loader,
+        store: Store,
+        persistence: Persistence?,
+        envKey: String,
+        fingerprint: ContextFingerprintFn
+    ) async throws -> Bool {
+        let (context, result) = try await loader.loadForCurrentContext()
+        let fp = fingerprint(context)
+        guard await store.applyIfCurrent(result, contextTag: fp) else { return false }
+        // Persist the fresh (or 304-confirmed) envelope under the fingerprint of
+        // the context it was fetched for, so a later cold start / serve-on-error
+        // has it.
+        persistence?.save(envelope: result.envelope, envKey: envKey, fingerprint: fp)
+        return true
+    }
+
     /// Race the first network fetch against a bounded timeout. Returns when either
     /// completes; never throws (the cache / empty defaults are the fallback).
     private func firstFetchOrTimeout(
@@ -285,16 +294,16 @@ public final class Quonfig: @unchecked Sendable {
         store: Store,
         persistence: Persistence?,
         envKey: String,
-        fingerprint: String,
         timeout: TimeInterval
     ) async {
+        let fingerprint = fingerprintFn
         let fetchTask = Task { () -> Bool in
             do {
-                let result = try await loader.load()
-                await store.apply(loaderResult: result)
-                persistence?.save(
-                    envelope: result.envelope, envKey: envKey, fingerprint: fingerprint)
-                return true
+                // Same context check as the poll: if this fetch outlives
+                // initialize and the app switches context, it is discarded.
+                return try await Quonfig.fetchApplyPersist(
+                    loader: loader, store: store, persistence: persistence, envKey: envKey,
+                    fingerprint: fingerprint)
             } catch {
                 return false
             }
@@ -389,31 +398,34 @@ public final class Quonfig: @unchecked Sendable {
 
     /// Switch identity: point the loader at the new context, immediately refetch
     /// its evaluated envelope, and resume the poll cadence (Unleash's stop +
-    /// refetch + restart; PostHog auto-refetch-on-identify). Serves the new
-    /// context's cold cache synchronously first so the UI doesn't flicker defaults
-    /// during the refetch.
+    /// refetch + restart; PostHog auto-refetch-on-identify).
+    ///
+    /// The previous context's values stop being served at once: the store
+    /// switches to the new context's cached envelope (no flicker for a
+    /// previously-seen context), or to caller defaults when there is none, until
+    /// the refetch lands. A fetch for the previous context that is still in
+    /// flight is discarded when it lands, never served or persisted under the
+    /// new context (qfg-goi1.2.3).
     public func updateContext(_ context: QuonfigContext) async throws {
+        await contextSwitchLock.acquire()
         let fp = fingerprintFn(context)
 
         contextBox.value = context
 
-        // The poller's persist step writes under whatever fingerprint this box
-        // holds — update it so a post-switch poll persists under the NEW context.
-        fingerprintBox.fingerprint = fp
-
         // Point the loader at the new context BEFORE refetching.
         await loader.updateContext(context)
 
-        // Serve the new context's cached envelope (if any) right away (§2.7).
-        if let cached = persistence?.load(envKey: envKey, fingerprint: fp) {
-            await store.apply(cached)
-        }
+        // Serve the new context's cached envelope, or caller defaults, right away
+        // (§2.7). Unconditional: the held generation watermark belongs to the
+        // previous context, so the reject-older guard must not compare against it.
+        await store.resetForContextSwitch(
+            to: persistence?.load(envKey: envKey, fingerprint: fp), contextTag: fp)
 
-        // Immediate refetch under a bumped generation; the poller discards any
-        // slow in-flight fetch for the OLD context (Statsig #1/#36). The poller's
-        // fetch closure persists the freshly-resolved envelope itself, so there is
-        // nothing more to write here.
+        // Immediate refetch for the new context. If a fetch for the old context
+        // is in flight, the refetch runs as soon as it lands. The fetch closure
+        // persists the freshly-resolved envelope itself.
         await poller.updateContext()
+        await contextSwitchLock.release()
     }
 
     /// The current evaluation context (thread-safe read).
@@ -449,21 +461,28 @@ public enum QuonfigInitError: Error, Sendable, Equatable {
     case missingSDKKey
 }
 
-/// A tiny `@unchecked Sendable` box carrying the cache key + fingerprint the
-/// poller's persist step writes under. Mutated only via `updateContext`'s lock on
-/// the client, read on the poller's queue. (Today the fingerprint is fixed per
-/// context; the box exists so a future per-tick fingerprint refresh has a seam.)
-final class FingerprintBox: @unchecked Sendable {
-    private let lock = NSLock()
-    let envKey: String
-    private var _fingerprint: String
-    var fingerprint: String {
-        get { lock.lock(); defer { lock.unlock() }; return _fingerprint }
-        set { lock.lock(); _fingerprint = newValue; lock.unlock() }
+/// A FIFO async mutex. Actors are reentrant across `await`, so an actor method
+/// alone cannot keep a multi-step `updateContext` atomic; callers `acquire()`
+/// before the first step and `release()` after the last.
+final actor AsyncSerialLock {
+    private var held = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func acquire() async {
+        guard held else {
+            held = true
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
     }
-    init(envKey: String, fingerprint: String) {
-        self.envKey = envKey
-        self._fingerprint = fingerprint
+
+    func release() {
+        if waiters.isEmpty {
+            held = false
+        } else {
+            // Ownership passes straight to the next waiter; `held` stays true.
+            waiters.removeFirst().resume()
+        }
     }
 }
 

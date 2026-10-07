@@ -163,6 +163,12 @@ public actor Store {
     /// "reads-before-init register, then replay on ready, not silently dropped").
     private var pendingReadyCallbacks: [@Sendable () -> Void] = []
 
+    /// Fingerprint of the context the held snapshot belongs to (qfg-goi1.2.3).
+    /// `nil` for a standalone store that is never context-tagged. Set by the
+    /// client at init and on every `updateContext`; a fetch built for any other
+    /// context is discarded by `applyIfCurrent`.
+    private var contextTag: String?
+
     public init() {}
 
     // MARK: - Mutation (actor-isolated)
@@ -176,6 +182,13 @@ public actor Store {
     /// callbacks, even if the envelope is empty.
     @discardableResult
     public func apply(_ envelope: EvalEnvelope) -> Bool {
+        install(envelope, rejectOlder: true)
+    }
+
+    /// Install `envelope`; `rejectOlder: false` skips the reject-older guard (a
+    /// context switch, where the held watermark belongs to another context).
+    @discardableResult
+    private func install(_ envelope: EvalEnvelope, rejectOlder: Bool) -> Bool {
         let current = snapshotBox.value
         let wasReady = current.ready
         let incomingGen = envelope.meta.generation
@@ -192,7 +205,7 @@ public actor Store {
         // snapshot whose evaluations differ is a context re-eval (the config
         // version is the same, the context changed), not a regression, so it
         // still applies — its hash differs, so it also notifies.
-        if wasReady, incomingGen > 0, incomingGen < current.generation {
+        if rejectOlder, wasReady, incomingGen > 0, incomingGen < current.generation {
             return false
         }
 
@@ -231,6 +244,39 @@ public actor Store {
     @discardableResult
     public func apply(loaderResult: LoaderResult) -> Bool {
         apply(loaderResult.envelope)
+    }
+
+    // MARK: - Context isolation (qfg-goi1.2.3)
+
+    /// Tag the store with the context its snapshot belongs to, without changing
+    /// the snapshot. The client calls this once at init.
+    func setContextTag(_ tag: String) {
+        contextTag = tag
+    }
+
+    /// Apply a fetch result only if it was built for the current context
+    /// (`contextTag` is the fingerprint of the context the request carried).
+    /// Returns `false`, installing nothing, for a result that belongs to a
+    /// context the client has since switched away from. The check and the
+    /// install run in one actor turn, so a concurrent `resetForContextSwitch`
+    /// cannot slip between them.
+    func applyIfCurrent(_ result: LoaderResult, contextTag tag: String) -> Bool {
+        guard contextTag == nil || contextTag == tag else { return false }
+        apply(loaderResult: result)
+        return true
+    }
+
+    /// Switch the store to a new context: install that context's cached envelope
+    /// unconditionally, or an empty ready envelope (getters return caller
+    /// defaults) when it has none. The previous context's snapshot and its
+    /// generation watermark are dropped, so the reject-older guard only ever
+    /// compares generations within one context's stream. Subscribers are
+    /// notified when the resolved values change.
+    func resetForContextSwitch(to cached: EvalEnvelope?, contextTag tag: String) {
+        contextTag = tag
+        let envelope =
+            cached ?? EvalEnvelope(evaluations: [:], meta: EvalMeta(version: "", environment: ""))
+        install(envelope, rejectOlder: false)
     }
 
     /// Pull one envelope from the loader and apply it. The store-side half of the
