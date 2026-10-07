@@ -4,6 +4,17 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 `Sources/Quonfig/Version.swift`; a `vX.Y.Z` tag is the release (see
 `RELEASING.md`).
 
+## Unreleased
+
+Semver: none (CI-only; no published artifact changes, no release needed).
+
+### Internal
+
+- CI now checks out `integration-test-data` at the pinned tag `v2026.10.03` as
+  a sibling of `sdk-swift` in the SPM job, so the duration-grammar drift check
+  (`DurationTests.testVendoredFixtureMatchesIntegrationTestData`) runs in CI
+  instead of always skipping (qfg-goi1.1.8).
+
 ## 0.2.0
 
 New getters (qfg-2agi.14), additive; telemetry summary cap default aligned to

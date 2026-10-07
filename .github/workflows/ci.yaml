@@ -23,9 +23,30 @@ jobs:
   spm:
     name: SPM (format + build + test + TSan)
     runs-on: macos-15
+    # sdk-swift is checked out into a subdir so integration-test-data can sit
+    # beside it, the same layout as the monorepo; every step runs from there.
+    defaults:
+      run:
+        working-directory: sdk-swift
     steps:
       - name: Checkout sdk-swift
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          path: sdk-swift
+
+      # DurationTests.testVendoredFixtureMatchesIntegrationTestData compares the
+      # vendored Tests/QuonfigTests/Fixtures/duration-grammar.yaml with
+      # tests/duration/grammar.yaml from a sibling integration-test-data
+      # checkout, and skips when there is none. Pinned to a tag (not main) so a
+      # typo in shared YAML can't break every SDK's CI at once; it must be a
+      # tag that contains tests/duration/grammar.yaml.
+      # See integration-test-data/RELEASING.md.
+      - name: Checkout integration-test-data
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: quonfig/integration-test-data
+          path: integration-test-data
+          ref: v2026.10.03
 
       - name: Select Xcode
         run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -n1)"
@@ -70,7 +91,7 @@ jobs:
       # The validation / smoke app must keep compiling and running headless
       # against its in-process fixture server (test-swift/, plan §6 step 6).
       - name: Build + run test-swift validation app
-        working-directory: test-swift
+        working-directory: sdk-swift/test-swift
         run: |
           swift build
           swift run TestSwiftApp
