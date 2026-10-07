@@ -1,5 +1,8 @@
 import CryptoKit
 import Foundation
+import os
+
+private let contextLogger = os.Logger(subsystem: "com.quonfig.sdk", category: "Quonfig")
 
 /// A scalar context value. Quonfig contexts are flat per namespace — only
 /// scalars and string arrays match operators at runtime; nested objects are
@@ -41,6 +44,11 @@ public struct QuonfigContext: Sendable, Equatable {
         for (ns, values) in namespaces {
             var inner: [String: Any] = [:]
             for (k, v) in values {
+                if case .double(let d) = v, !d.isFinite {
+                    contextLogger.debug(
+                        "Quonfig: context attribute \(ns, privacy: .public).\(k, privacy: .public) is not a finite number; encoding it as null"
+                    )
+                }
                 inner[k] = v.jsonValue
             }
             root[ns] = inner
@@ -54,11 +62,15 @@ public struct QuonfigContext: Sendable, Equatable {
 
 extension ContextValue {
     /// The Foundation/JSON representation used for serialization.
+    ///
+    /// A non-finite double (NaN, +/-infinity) becomes JSON `null`, as
+    /// sdk-javascript's `JSON.stringify` does. `JSONSerialization` would
+    /// otherwise raise an Objective-C exception that Swift cannot catch.
     var jsonValue: Any {
         switch self {
         case .string(let s): return s
         case .int(let i): return i
-        case .double(let d): return d
+        case .double(let d): return d.isFinite ? d : NSNull()
         case .bool(let b): return b
         case .stringList(let l): return l
         }

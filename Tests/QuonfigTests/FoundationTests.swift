@@ -152,6 +152,31 @@ final class ContextEncodingTests: XCTestCase {
         XCTAssertEqual(user["n"] as! Int, 7)
         XCTAssertEqual(user["on"] as! Bool, true)
     }
+
+    /// F4 (qfg-goi1.2.17): a NaN or infinite `.double` used to reach
+    /// `JSONSerialization`, which raises an uncatchable Objective-C exception
+    /// (`Invalid number value (NaN) in JSON write`) from `initialize` /
+    /// `updateContext`. Non-finite doubles now encode as JSON `null`, the same
+    /// as sdk-javascript's `JSON.stringify(NaN)`.
+    func testNonFiniteDoublesEncodeAsNull() throws {
+        let ctx = QuonfigContext([
+            "user": [
+                "key": .string("u_1"),
+                "nan": .double(.nan),
+                "inf": .double(.infinity),
+                "negInf": .double(-.infinity),
+                "ok": .double(1.5),
+            ]
+        ])
+        let data = try ctx.canonicalJSONData()
+        XCTAssertEqual(
+            String(decoding: data, as: UTF8.self),
+            #"{"user":{"inf":null,"key":"u_1","nan":null,"negInf":null,"ok":1.5}}"#)
+        // Both callers of the canonical JSON survive: the cache fingerprint and
+        // the eval URL path segment.
+        XCTAssertEqual(ctx.defaultFingerprint().count, 64)
+        XCTAssertFalse(try ctx.encodedPathSegment().isEmpty)
+    }
 }
 
 final class FingerprintTests: XCTestCase {
