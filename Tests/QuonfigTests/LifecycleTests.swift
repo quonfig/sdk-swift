@@ -2,6 +2,12 @@ import XCTest
 
 @testable import Quonfig
 
+#if canImport(UIKit)
+    import UIKit
+#elseif canImport(AppKit)
+    import AppKit
+#endif
+
 final class LifecycleTests: XCTestCase {
 
     private actor Counter {
@@ -156,4 +162,53 @@ final class LifecycleTests: XCTestCase {
         XCTAssertTrue(running, "with no platform notifications the timer still runs continuously")
         coord.stop()
     }
+
+    // MARK: - System provider mapping (F6, qfg-goi1.2.17)
+
+    /// macOS has no "enter background". Mapping resign-active to background
+    /// stopped polling whenever another app was frontmost, so menu-bar apps and
+    /// windows left behind others kept stale config for hours. On AppKit the
+    /// system provider now has no background notification: polling runs
+    /// continuously, and becoming active still fires a catch-up fetch.
+    func testSystemProviderNotificationMapping() {
+        let provider = SystemLifecycleProvider(notificationCenter: NotificationCenter())
+        #if canImport(UIKit)
+            XCTAssertEqual(provider.foregroundNotification, UIApplication.didBecomeActiveNotification)
+            XCTAssertEqual(provider.backgroundNotification, UIApplication.didEnterBackgroundNotification)
+        #elseif canImport(AppKit)
+            XCTAssertEqual(provider.foregroundNotification, NSApplication.didBecomeActiveNotification)
+            XCTAssertNil(provider.backgroundNotification, "macOS must not treat losing focus as backgrounding")
+        #else
+            XCTAssertNil(provider.foregroundNotification)
+            XCTAssertNil(provider.backgroundNotification)
+        #endif
+    }
+
+    #if !canImport(UIKit) && canImport(AppKit)
+        /// F6 end to end on macOS: resigning active (the user clicks another
+        /// app) leaves the poll timer running and does not flush telemetry.
+        func testMacOSResignActiveKeepsPolling() async {
+            let center = NotificationCenter()
+            let flushes = Counter()
+            let poller = Poller(fetch: {})
+            let coord = LifecycleCoordinator(
+                provider: SystemLifecycleProvider(notificationCenter: center),
+                poller: poller,
+                pollInterval: 100,
+                onBackground: { await flushes.bump() }
+            )
+            coord.start()
+            let running = await eventually { await poller.isRunning }
+            XCTAssertTrue(running)
+
+            center.post(name: NSApplication.didResignActiveNotification, object: nil)
+            // Give a (wrongly) wired background handler time to run.
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            let stillRunning = await poller.isRunning
+            let flushCount = await flushes.current()
+            XCTAssertTrue(stillRunning, "resign-active must not stop polling on macOS")
+            XCTAssertEqual(flushCount, 0, "resign-active must not run the background flush on macOS")
+            coord.stop()
+        }
+    #endif
 }

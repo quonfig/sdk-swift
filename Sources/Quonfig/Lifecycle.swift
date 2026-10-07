@@ -30,8 +30,10 @@ public protocol LifecycleProvider: Sendable {
 /// notification names for the compiled platform, exactly mirroring LD's
 /// `SystemCapabilities`:
 ///   - UIKit (iOS/tvOS/watchOS): `didBecomeActive` / `didEnterBackground`.
-///   - AppKit (macOS): `didBecomeActive` / `didResignActive` (macOS has no
-///     "enter background" — resign-active is the closest analog).
+///   - AppKit (macOS): `didBecomeActive` / none. macOS has no "enter
+///     background", and resign-active only means another app is frontmost, so
+///     polling runs continuously (menu-bar apps and windows behind others stay
+///     fresh). Becoming active still fires a catch-up fetch.
 ///   - Neither: both `nil`, so the observer is a no-op and the poller runs
 ///     continuously (Linux/server-Swift test harnesses).
 public struct SystemLifecycleProvider: LifecycleProvider {
@@ -55,7 +57,8 @@ public struct SystemLifecycleProvider: LifecycleProvider {
         #if canImport(UIKit)
             return UIApplication.didEnterBackgroundNotification
         #elseif canImport(AppKit)
-            return NSApplication.didResignActiveNotification
+            // Losing focus is not backgrounding on macOS; keep polling.
+            return nil
         #else
             return nil
         #endif

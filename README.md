@@ -80,7 +80,9 @@ Notes:
   default.
 - The SDK **polls** (default 60s foreground) with `ETag`/`If-None-Match` so an
   unchanged flag set is a cheap `304`. It refetches immediately on app foreground
-  and on `updateContext`, and suspends polling in the background.
+  and on `updateContext`, and suspends polling in the background on iOS. macOS
+  has no background state, so a macOS app polls continuously, including while
+  another app is frontmost.
 - `updateContext` stops serving the previous context's values at once: until
   the refetch lands you get the new context's cached values (if it was seen
   before) or your caller-supplied defaults, never the previous user's values. A
@@ -128,8 +130,8 @@ How uploads behave (the Quonfig SDK telemetry transport policy, mobile column):
   for the rest of the process (a wrong SDK key or telemetry URL will not fix
   itself). **Other `4xx`** (`400`, `413`, `422`, ...): that batch is dropped with
   one ERROR and uploads continue.
-- **Background:** on app background (and `shutdown()`), the live window is
-  written to disk and POSTed once inside a ~**5s** background task
+- **Background:** on iOS app background (and on `shutdown()` on any platform),
+  the live window is written to disk and POSTed once inside a ~**5s** background task
   (`ProcessInfo.performExpiringActivity`, which also works in app extensions).
   Older queued batches wait for the next foreground tick.
 
