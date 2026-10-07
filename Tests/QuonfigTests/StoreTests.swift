@@ -84,6 +84,42 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(store.double("intAsDouble", default: 0), 5.0)
     }
 
+    /// F3 (qfg-goi1.2.17): a whole double outside the `Int` range used to trap
+    /// in `int(...)` ("Double value cannot be converted to Int"). It now falls
+    /// back to the caller's default, like any other unreadable value.
+    func testIntGetterOnOutOfRangeDoubleReturnsDefault() async {
+        let store = Store()
+        await store.apply(
+            envelope([
+                "huge": eval(type: "double", value: .double(1e20)),
+                "hugeNegative": eval(type: "double", value: .double(-1e20)),
+                "twoTo63": eval(type: "double", value: .double(9_223_372_036_854_775_808.0)),
+            ]))
+        XCTAssertEqual(store.int("huge", default: 7), 7)
+        XCTAssertEqual(store.int("hugeNegative", default: 7), 7)
+        XCTAssertEqual(store.int("twoTo63", default: 7), 7)
+        XCTAssertEqual(store.int("huge", default: 8, logExposure: false), 8)
+        // The double getter still reads the value.
+        XCTAssertEqual(store.double("huge", default: 0), 1e20)
+    }
+
+    /// F3: an `int`-typed wire value that decodes as a double outside the
+    /// `Int64` range used to trap in `coerce`, which runs on every getter. It is
+    /// now not coerced to `int`, so the int getter returns the default.
+    func testIntWireValueOutOfRangeDoesNotTrap() async {
+        let store = Store()
+        await store.apply(
+            envelope([
+                "big": eval(type: "int", value: .double(1e20)),
+                "wholeInRange": eval(type: "int", value: .double(42.0)),
+            ]))
+        XCTAssertEqual(store.int("big", default: 3), 3)
+        XCTAssertFalse(store.isEnabled("big"))
+        XCTAssertEqual(store.string("big", default: "d"), "d")
+        // A whole in-range double on the int wire still coerces.
+        XCTAssertEqual(store.int("wholeInRange", default: 0), 42)
+    }
+
     func testJSONGetter() async {
         let store = Store()
         await store.apply(

@@ -390,7 +390,7 @@ public actor Store {
     public nonisolated func int(_ key: String, default def: Int) -> Int {
         switch resolved(key)?.coerced {
         case .int(let i)?: return Int(i)
-        case .double(let d)? where d == d.rounded(): return Int(d)
+        case .double(let d)?: return Int(exactly: d) ?? def
         default: return def
         }
     }
@@ -484,7 +484,7 @@ public actor Store {
     public nonisolated func int(_ key: String, default def: Int, logExposure: Bool) -> Int {
         switch resolved(key, logExposure: logExposure)?.coerced {
         case .int(let i)?: return Int(i)
-        case .double(let d)? where d == d.rounded(): return Int(d)
+        case .double(let d)?: return Int(exactly: d) ?? def
         default: return def
         }
     }
@@ -570,7 +570,7 @@ public actor Store {
             if case .bool(let b) = v { return .bool(b) }
         case "int":
             if case .int(let i) = v { return .int(i) }
-            if case .double(let d) = v, d == d.rounded() { return .int(Int64(d)) }
+            if case .double(let d) = v, let i = Int64(exactly: d) { return .int(i) }
         case "double":
             if case .double(let d) = v { return .double(d) }
             if case .int(let i) = v { return .double(Double(i)) }
