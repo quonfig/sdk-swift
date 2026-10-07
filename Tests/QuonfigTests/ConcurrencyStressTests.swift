@@ -142,7 +142,17 @@ final class ConcurrencyStressTests: XCTestCase {
         XCTAssertTrue(store.isReady)
         XCTAssertGreaterThanOrEqual(fires.value, 0)
         // Final-state sanity: all churned subscribers cancelled -> count back to 0.
-        let remaining = await store.subscriberCount
+        // `SubscriptionToken.cancel()` hops onto the actor via a fire-and-forget
+        // `Task`, so the removals can still be queued when the task group ends
+        // (on a starved executor, e.g. the iOS Simulator CI job, nearly all of
+        // them are: qfg-pmqy). Wait, bounded, for them to drain instead of
+        // assuming a Task ordering. A real leak never reaches 0 and still fails.
+        let deadline = Date().addingTimeInterval(10)
+        var remaining = await store.subscriberCount
+        while remaining != 0 && Date() < deadline {
+            try await Task.sleep(nanoseconds: 1_000_000)
+            remaining = await store.subscriberCount
+        }
         XCTAssertEqual(remaining, 0, "every churned subscriber must be cancelled")
     }
 

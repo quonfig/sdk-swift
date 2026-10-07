@@ -6,7 +6,7 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 
 ## Unreleased
 
-Semver: none (CI-only; no published artifact changes, no release needed).
+Semver: none (CI and test-only; no published artifact changes, no release needed).
 
 ### Internal
 
@@ -14,6 +14,12 @@ Semver: none (CI-only; no published artifact changes, no release needed).
   a sibling of `sdk-swift` in the SPM job, so the duration-grammar drift check
   (`DurationTests.testVendoredFixtureMatchesIntegrationTestData`) runs in CI
   instead of always skipping (qfg-goi1.1.8).
+- Fixed the flaky `ConcurrencyStressTests.testConcurrentSubscribeCancelDuringApplies`
+  (qfg-pmqy). `SubscriptionToken.cancel()` removes the subscriber through a
+  fire-and-forget `Task` on the store actor, so the test read
+  `subscriberCount` while the removals were still queued (`99 != 0` on the iOS
+  Simulator job). The test now waits, with a 10 s limit, for the count to reach
+  0. A real leak still fails it. Test-only change.
 
 ## 0.2.0
 
