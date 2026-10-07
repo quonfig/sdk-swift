@@ -313,7 +313,7 @@ public final class Quonfig: @unchecked Sendable {
         }
 
         let timeoutTask = Task { () -> Void in
-            try? await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
+            try? await Task.sleep(nanoseconds: sleepNanoseconds(timeout))
         }
 
         // Wait for whichever finishes first. We await the timeout, then check the

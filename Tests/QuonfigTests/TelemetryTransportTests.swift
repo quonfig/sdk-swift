@@ -341,6 +341,26 @@ final class TelemetryTransportTests: XCTestCase {
         XCTAssertEqual(logs.count(.error), 0)
     }
 
+    // MARK: F11 (qfg-goi1.2.17) - "effectively never" intervals don't trap
+
+    /// An infinite flush interval or POST deadline overflowed the
+    /// `UInt64(seconds * 1e9)` nanosecond conversion and trapped. Both are now
+    /// clamped, so they mean "wait as long as possible".
+    func testInfiniteFlushIntervalAndTimeoutDoNotTrap() async {
+        stub.script([.init(status: 200)])
+        var policy = TelemetryTransportPolicy()
+        policy.flushInterval = .infinity
+        policy.timeout = .infinity
+        let agg = makeAggregator(policy: policy)
+        await agg.start()  // the tick loop sleeps for the clamped interval
+        await record(agg, "a")
+        await tick(agg)  // the POST races a clamped deadline
+        XCTAssertEqual(stub.postCount, 1)
+        let retained = await agg.retainedCount
+        XCTAssertEqual(retained, 0)
+        await agg.stop()
+    }
+
     // MARK: T3 - non-retryable 4xx (P3)
 
     func testT3a_AuthStatusesDisableTelemetry() async {

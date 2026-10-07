@@ -241,7 +241,7 @@ public actor SummaryAggregator {
         syncTask = Task { [weak self] in
             while !Task.isCancelled {
                 do {
-                    try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                    try await Task.sleep(nanoseconds: sleepNanoseconds(interval))
                 } catch {
                     return  // cancelled
                 }

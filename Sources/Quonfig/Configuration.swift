@@ -174,3 +174,14 @@ public struct Configuration: Sendable {
         return config
     }
 }
+
+/// Seconds to `Task.sleep` nanoseconds, clamped so a configured interval can
+/// never trap the conversion: NaN or a non-positive value is 0, and anything
+/// past `UInt64.max` nanoseconds (`.infinity`, used to mean "effectively
+/// never") is `UInt64.max` (about 584 years).
+func sleepNanoseconds(_ seconds: TimeInterval) -> UInt64 {
+    guard seconds > 0 else { return 0 }
+    let nanos = seconds * 1_000_000_000
+    guard nanos < Double(UInt64.max) else { return UInt64.max }
+    return UInt64(nanos)
+}

@@ -222,6 +222,27 @@ final class QuonfigClientTests: XCTestCase {
         XCTAssertEqual(q.int("rate-limit", default: 42), 42)
     }
 
+    // MARK: F11 (qfg-goi1.2.17): initTimeout .infinity does not trap
+
+    /// `initTimeout: .infinity` ("wait for the network") overflowed the
+    /// `UInt64(seconds * 1e9)` conversion in the init race and trapped. It is
+    /// now clamped, so init simply waits for the first fetch.
+    func testInfiniteInitTimeoutDoesNotTrap() async throws {
+        let mock = MockClient([.init(status: 200, headers: ["ETag": "e1"], body: try evalBody())])
+        let q = await makeClient(mock: mock, context: sampleContext(), initTimeout: .infinity)
+        XCTAssertTrue(q.isReady)
+        XCTAssertTrue(q.isEnabled("new-checkout"))
+    }
+
+    func testSleepNanosecondsClamps() {
+        XCTAssertEqual(sleepNanoseconds(1.5), 1_500_000_000)
+        XCTAssertEqual(sleepNanoseconds(0), 0)
+        XCTAssertEqual(sleepNanoseconds(-3), 0)
+        XCTAssertEqual(sleepNanoseconds(.nan), 0)
+        XCTAssertEqual(sleepNanoseconds(.infinity), UInt64.max)
+        XCTAssertEqual(sleepNanoseconds(1e300), UInt64.max)
+    }
+
     // MARK: duration + stringList getters (qfg-2agi.14)
 
     func testDurationAndStringListGetters() async throws {

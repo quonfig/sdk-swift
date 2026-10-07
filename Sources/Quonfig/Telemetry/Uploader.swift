@@ -169,7 +169,7 @@ public final class TelemetryUploader: Sendable {
 
         let client = self.client
         let finalRequest = request
-        let deadline = UInt64(max(timeout, 0) * 1_000_000_000)
+        let deadline = sleepNanoseconds(timeout)
         return try await withThrowingTaskGroup(of: TelemetryPostResult.self) { group in
             group.addTask {
                 try await TelemetryUploader.perform(finalRequest, client: client)
