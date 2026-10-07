@@ -25,10 +25,12 @@ import Foundation
 ///     flight; ticks that fire while a fetch runs do **not** stack — they set a
 ///     single "pending follow-up" flag that runs exactly one more fetch after the
 ///     current one completes, folding any number of coalesced ticks into one.
-///   - **Generation counter**: `updateContext` and `stop` bump a generation; a
-///     fetch that completes for a superseded generation is discarded rather than
-///     applied, so a slow in-flight request for the *old* context can't clobber
-///     the new one. (Statsig #1/#36)
+///   - **Generation counter**: `updateContext` and `stop` bump a generation, so
+///     timer ticks scheduled before the bump are ignored and `stop` drops any
+///     armed follow-up. The poller does not judge fetch *results*: the client's
+///     fetch closure discards a result built for a context that is no longer
+///     current (qfg-goi1.2.3), so a slow in-flight request for the *old* context
+///     can't clobber the new one. (Statsig #1/#36)
 ///
 /// The poller is transport-agnostic: it's handed a `@Sendable` async `fetch`
 /// closure (the `Quonfig` client wires this to `Store.refresh(using:)`), so this
@@ -47,8 +49,8 @@ public actor Poller {
     /// The interval the timer is currently scheduled at (`nil` => not running).
     private var interval: TimeInterval?
 
-    /// Bumped by `updateContext`/`stop`; a fetch tagged with an older generation
-    /// is discarded on completion (Statsig #1/#36).
+    /// Bumped by `updateContext`/`stop`/`start`; a timer tick tagged with an
+    /// older generation is ignored (Statsig #1/#36).
     private var generation: UInt64 = 0
 
     /// Exactly one fetch in flight at a time (dedup).
@@ -123,9 +125,13 @@ public actor Poller {
         timer = nil
     }
 
-    /// Switch the polled context: bump the generation (so a slow in-flight fetch
-    /// for the OLD context is discarded), run one immediate refetch for the new
-    /// context, and resume the timer at the same interval.
+    /// Switch the polled context: bump the generation, resume the timer at the
+    /// same interval, and run one immediate refetch for the new context.
+    ///
+    /// If a fetch for the OLD context is still in flight, the refetch is armed as
+    /// the follow-up and runs as soon as that fetch lands (qfg-goi1.2.3); this
+    /// call then returns without waiting for it. The timer is restarted first, so
+    /// its own generation bump can't drop the follow-up armed here.
     ///
     /// `updateContext` itself does NOT mutate the fetch closure — the closure
     /// reads context fresh from whatever it's bound to (the `Loader` actor, whose
@@ -133,11 +139,11 @@ public actor Poller {
     /// + generation and kicks an immediate catch-up. (Statsig #1/#36)
     public func updateContext() async {
         let resumeInterval = interval
-        stop()  // bumps generation, tears down the timer
-        await refreshNow()  // immediate refetch under the NEW generation
+        stop()  // bumps generation, tears down the timer, drops any follow-up
         if let resumeInterval {
             start(interval: resumeInterval)
         }
+        await refreshNow()  // immediate refetch (or follow-up) for the new context
     }
 
     /// Run a single fetch right now (the foreground catch-up, §2.6), respecting
@@ -171,7 +177,6 @@ public actor Poller {
         fetching = true
         repeat {
             pendingFollowUp = false
-            let runGen = generation
             fetchCount += 1
             do {
                 try await fetch()
@@ -180,12 +185,11 @@ public actor Poller {
                 // good (or cached) envelope and the timer keeps ticking. Swallow
                 // exactly as sdk-javascript's poll catch does.
             }
-            // If the generation moved while we were fetching (stop/updateContext),
-            // drop any follow-up — the new generation drives its own fetches.
-            if runGen != generation {
-                pendingFollowUp = false
-                break
-            }
+            // `stop()` clears `pendingFollowUp`, so a follow-up still armed here
+            // was armed after the last generation bump: it belongs to the
+            // current generation (e.g. updateContext's refetch for the new
+            // context) and must run. Dropping it on a generation change is what
+            // left the new context unfetched (qfg-goi1.2.3).
         } while pendingFollowUp
         fetching = false
     }

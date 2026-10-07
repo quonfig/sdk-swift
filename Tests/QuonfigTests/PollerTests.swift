@@ -170,6 +170,44 @@ final class PollerTests: XCTestCase {
         XCTAssertEqual(total, 1, "stop() during a fetch discards the coalesced follow-up")
     }
 
+    /// qfg-goi1.2.3 (audit F1): `updateContext` while a fetch for the OLD context
+    /// is in flight must still run a fetch for the NEW context once the old one
+    /// lands. The refetch it arms must not be dropped by its own generation bump.
+    func testUpdateContextDuringInFlightFetchStillRefetches() async {
+        let rec = FetchRecorder()
+        let poller = Poller(fetch: { await rec.record() })
+        await poller.start(interval: 100)  // long interval: no timer ticks
+
+        await rec.armBlock()
+        async let first: Void = poller.refreshNow()
+        var waited = 0
+        while await rec.current() < 1, waited < 1000 {
+            await Task.yield()
+            waited += 1
+        }
+        let inFlight = await poller.isFetching
+        XCTAssertTrue(inFlight, "old-context fetch should be in flight")
+
+        await poller.updateContext()
+
+        await rec.release()
+        _ = await first
+
+        var settled = 0
+        while settled < 1000 {
+            let done = await rec.current() >= 2
+            let busy = await poller.isFetching
+            if done && !busy { break }
+            await Task.yield()
+            settled += 1
+        }
+        let total = await rec.current()
+        XCTAssertEqual(total, 2, "the new context's fetch must run after the in-flight old one lands")
+        let running = await poller.isRunning
+        XCTAssertTrue(running, "updateContext resumes the timer")
+        await poller.stop()
+    }
+
     func testUpdateContextBumpsGenerationAndRefetches() async {
         let rec = FetchRecorder()
         let poller = Poller(fetch: { await rec.record() })
