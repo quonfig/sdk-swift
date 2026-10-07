@@ -8,7 +8,9 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 
 Semver: **minor** (0.3.0). The context-switch fix below changes what getters
 return in the window between `updateContext` and its refetch, and while offline
-after a switch. The value after a successful refetch is unchanged.
+after a switch. The value after a successful refetch is unchanged. The
+qfg-goi1.2.17 fixes (crash paths, timeouts, macOS polling) are edge-case
+behavior changes and fit in the same minor.
 
 ### Fixed
 
@@ -28,6 +30,27 @@ after a switch. The value after a successful refetch is unchanged.
   context's cached envelope unconditionally, or caller defaults when there is
   none, as the README's "Known limitation" section already describes. The
   generation guard now applies only within one context.
+- **`int(...)` crashed on a whole double outside the `Int` range
+  (qfg-goi1.2.17).** A `double` config of `1e20` read through `int(...)`, or an
+  `int`-typed value that decoded as a double at or above 2^63 (read through any
+  getter, including `isEnabled`), trapped with "Double value cannot be converted
+  to Int". `int(...)` now returns your default, and an out-of-range `int` wire
+  value is not coerced (`int(...)` returns the default, `isEnabled` false).
+- **A NaN or infinite context attribute crashed `initialize` and
+  `updateContext`.** `ContextValue.double(.nan)` (or an infinity) reached
+  `JSONSerialization`, which raises an Objective-C exception Swift cannot catch.
+  Non-finite doubles are now sent as JSON `null`, as sdk-javascript's
+  `JSON.stringify` does, with a debug log naming the attribute.
+- **Infinite intervals trapped.** `initTimeout: .infinity`, or an infinite
+  `telemetryFlushInterval` / `telemetryTimeout`, overflowed the nanosecond
+  conversion and crashed. They are now clamped (about 584 years), so they mean
+  "wait as long as possible".
+- **macOS stopped polling whenever the app lost focus.** Resigning active was
+  treated as entering the background, so the poll timer stopped (and telemetry
+  flushed) every time another app became frontmost; menu-bar apps and windows
+  behind others kept stale config for hours. macOS now polls continuously.
+  Becoming active still fires a catch-up fetch, and `shutdown()` still flushes
+  telemetry. iOS is unchanged.
 
 ### Changed
 
@@ -46,6 +69,20 @@ after a switch. The value after a successful refetch is unchanged.
   generation changed while a fetch was in flight. `stop()` still drops any armed
   follow-up. The poller never judged fetch results; the client's fetch closure
   discards a result for a context that is no longer current.
+- **The default session bounds every request (qfg-goi1.2.17).** It used
+  URLSession's defaults (a 60s idle timeout and a 7-day resource timeout), so a
+  primary that accepted the connection and never answered held each poll for
+  60s before failover, and a slow-drip response held the poller's single
+  in-flight fetch indefinitely. The default session now uses a 10s idle timeout
+  (`requestTimeout`) and a 30s end-to-end timeout (`resourceTimeout`). The
+  resource timeout also covers telemetry POSTs on the same session, so it stays
+  above the 15s telemetry deadline. Pass `requestTimeout` / `resourceTimeout`,
+  or your own `sessionConfiguration`, to change them.
+- **`subscribe` warns when its token is discarded.** `@discardableResult` is
+  removed. A discarded `SubscriptionToken` cancels the subscription at once, so
+  `await quonfig.subscribe { ... }` compiled silently and the listener never
+  fired. Such call sites now get a compiler warning (not an error); hold the
+  token for as long as you want updates.
 
 Upgrade note: switching to a context the device has never seen (for example the
 first login of a new user on a device) now returns your caller-supplied defaults
