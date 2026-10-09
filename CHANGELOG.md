@@ -4,13 +4,13 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 `Sources/Quonfig/Version.swift`; a `vX.Y.Z` tag is the release (see
 `RELEASING.md`).
 
-## Unreleased
+## 0.3.0 - 2026-10-09
 
-Semver: **minor** (0.3.0). The context-switch fix below changes what getters
-return in the window between `updateContext` and its refetch, and while offline
-after a switch. The value after a successful refetch is unchanged. The
-qfg-goi1.2.17 fixes (crash paths, timeouts, macOS polling) are edge-case
-behavior changes and fit in the same minor.
+`updateContext` never serves or caches the previous user's values under a new
+context (qfg-goi1.2.3); crash, timeout and macOS polling fixes (qfg-goi1.2.17).
+The context-switch fix changes what getters return in the window between
+`updateContext` and its refetch, and while offline after a switch; see the
+upgrade note below. The value after a successful refetch is unchanged.
 
 ### Fixed
 
