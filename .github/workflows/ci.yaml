@@ -98,9 +98,9 @@ jobs:
 
   # Cross-platform proof: the package compiles and tests through xcodebuild on a
   # real iOS simulator and on macOS. Kept to two destinations to bound macOS
-  # runner cost. A generic simulator destination ("name=iPhone ...") lets the
-  # runner pick whatever iOS runtime ships with the Xcode it has, so we don't
-  # pin a simulator that a future runner image drops.
+  # runner cost. The iOS destination is resolved at runtime (see "Pick iOS
+  # simulator") to a concrete iPhone UDID from the newest available iOS runtime,
+  # so we never pin a device name that a future runner image drops.
   xcodebuild:
     name: xcodebuild (${{ matrix.name }})
     runs-on: macos-15
@@ -110,7 +110,7 @@ jobs:
       matrix:
         include:
           - name: iOS Simulator
-            destination: "platform=iOS Simulator,name=iPhone 16"
+            destination: "platform=iOS Simulator"  # id=<UDID> appended by "Pick iOS simulator"
           - name: macOS
             destination: "platform=macOS"
     steps:
@@ -126,10 +126,47 @@ jobs:
       - name: Resolve package
         run: xcodebuild -resolvePackageDependencies -scheme quonfig-swift
 
+      # Run 37978997225 failed with "Unable to find a device matching ... name:iPhone 16"
+      # and xcodebuild listed NO concrete simulators at all, while a run 10 min
+      # later on the identical image (macos-15-arm64 20260907.0337.1, Xcode 26.3)
+      # found "iPhone 16, OS:26.2" and passed: CoreSimulator had not surfaced the
+      # iOS runtime yet on that machine. So poll simctl until an iPhone shows up
+      # (up to ~2 min), then pin it by UDID; fail loudly with the simctl state if
+      # none ever appears.
+      - name: Pick iOS simulator
+        if: matrix.name == 'iOS Simulator'
+        run: |
+          pick() {
+            xcrun simctl list devices available --json | jq -r '
+              [.devices | to_entries[]
+                | select(.key | test("SimRuntime\\.iOS-"))
+                | select([.value[] | select(.name | startswith("iPhone"))] | length > 0)]
+              | sort_by(.key | capture("iOS-(?<v>[0-9-]+)$").v | split("-") | map(tonumber))
+              | last // empty
+              | [.value[] | select(.name | startswith("iPhone"))][0]
+              | "\(.udid) \(.name)"'
+          }
+          for attempt in $(seq 1 12); do
+            picked=$(pick || true)
+            if [ -n "$picked" ]; then
+              echo "Using simulator: $picked"
+              echo "SIM_UDID=${picked%% *}" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "No available iPhone simulator yet (attempt $attempt/12); waiting 10s"
+            sleep 10
+          done
+          echo "::error::No available iPhone simulator on this runner"
+          xcrun simctl list runtimes
+          xcrun simctl list devices available
+          exit 1
+
       - name: Test (${{ matrix.name }})
         run: |
+          destination="${{ matrix.destination }}"
+          if [ -n "${SIM_UDID:-}" ]; then destination="$destination,id=$SIM_UDID"; fi
           xcodebuild test \
             -scheme quonfig-swift \
-            -destination "${{ matrix.destination }}" \
+            -destination "$destination" \
             -skipPackagePluginValidation \
             CODE_SIGNING_ALLOWED=NO
