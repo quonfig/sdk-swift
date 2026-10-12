@@ -153,6 +153,16 @@ public struct Evaluation: Sendable, Equatable, Codable {
     }
 }
 
+/// Decodes one envelope entry, yielding `nil` instead of throwing when the entry
+/// is malformed, so a bad key cannot reject the whole envelope (qfg-goi1.2.26).
+struct FailableEvaluation: Decodable {
+    let evaluation: Evaluation?
+
+    init(from decoder: Decoder) throws {
+        evaluation = try? Evaluation(from: decoder)
+    }
+}
+
 /// Response metadata. Mirrors `api-delivery/internal/config/types.go` `Meta`.
 ///
 /// `ServeHTTP` builds `Meta` with only `Version` + `Environment` for the
@@ -229,7 +239,13 @@ public struct EvalEnvelope: Sendable, Equatable, Codable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        evaluations = try c.decode([String: Evaluation].self, forKey: .evaluations)
+        // Decode per key (qfg-goi1.2.26): one malformed entry is dropped, so it
+        // resolves like an absent key (caller default, details reason ERROR)
+        // while the other flags still load. Matches sdk-go's skip-one-bad-config
+        // and sdk-javascript's per-key decode. A non-object `evaluations` still
+        // fails the envelope.
+        let entries = try c.decode([String: FailableEvaluation].self, forKey: .evaluations)
+        evaluations = entries.compactMapValues(\.evaluation)
         meta = try c.decode(EvalMeta.self, forKey: .meta)
     }
 

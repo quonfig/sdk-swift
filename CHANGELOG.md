@@ -8,6 +8,12 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 
 ### Fixed
 
+- **One malformed evaluation rejected the whole envelope (qfg-goi1.2.26,
+  minor).** An entry with a `null` value, a missing field or a non-object body
+  failed the decode for every flag, so that fetch was dropped and the app kept
+  stale or cached values (or got nothing at init). Entries now decode per key,
+  like sdk-go and sdk-javascript: a bad entry resolves like an absent key
+  (caller default, `details` reason `ERROR`) and the other flags still load.
 - **`initTimeout` did not bound `initialize()` when the first fetch hung
   (qfg-goi1.2.33, minor).** The first fetch and the timeout were raced in a task
   group, which waits for every child, so a hung request held `initialize()` until
