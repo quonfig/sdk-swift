@@ -93,6 +93,28 @@ public final class LifecycleCoordinator: @unchecked Sendable {
     private var foregroundObserver: NSObjectProtocol?
     private var backgroundObserver: NSObjectProtocol?
     private var started = false
+    /// Bumped by every lifecycle event (start, foreground, background, stop)
+    /// (qfg-goi1.10.13). Each event's poller work runs in an unordered Task, so
+    /// a Task only starts or stops the timer while its event is still the
+    /// latest one and the coordinator is started. A foreground catch-up that
+    /// lands after a later background or `stop()` (shutdown) therefore cannot
+    /// restart polling, and a stale background cannot stop a newer foreground.
+    private var epoch: UInt64 = 0
+
+    /// Record a new lifecycle event and return its epoch.
+    private func nextEpoch() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        epoch &+= 1
+        return epoch
+    }
+
+    /// Whether `e` is still the latest event of a started coordinator.
+    private func isCurrent(_ e: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return started && epoch == e
+    }
 
     public init(
         provider: LifecycleProvider = SystemLifecycleProvider(),
@@ -115,6 +137,8 @@ public final class LifecycleCoordinator: @unchecked Sendable {
             return
         }
         started = true
+        epoch &+= 1
+        let e = epoch
 
         let center = provider.notificationCenter
         let interval = pollInterval
@@ -139,7 +163,7 @@ public final class LifecycleCoordinator: @unchecked Sendable {
         // initial catch-up fetch is `Quonfig.initialize`'s job — the very first
         // envelope — so we don't double-fetch here; we only start the cadence.)
         let poller = self.poller
-        Task { await poller.start(interval: interval) }
+        Task { await poller.start(interval: interval, if: { [weak self] in self?.isCurrent(e) ?? false }) }
     }
 
     /// Foreground entry: one immediate catch-up fetch, then (re)start the timer.
@@ -147,20 +171,24 @@ public final class LifecycleCoordinator: @unchecked Sendable {
     /// values as fast as possible (§2.6). The poller's dedup/coalesce makes the
     /// catch-up + first tick safe even if they overlap.
     private func handleForeground(interval: TimeInterval) {
+        let e = nextEpoch()
+        let current: @Sendable () -> Bool = { [weak self] in self?.isCurrent(e) ?? false }
         let poller = self.poller
         Task {
             await poller.refreshNow()
-            await poller.start(interval: interval)
+            await poller.start(interval: interval, if: current)
         }
     }
 
     /// Background entry: suspend the timer FIRST (stop wasting the few seconds the
     /// OS grants on network polls), then run the telemetry-flush hook.
     private func handleBackground() {
+        let e = nextEpoch()
+        let current: @Sendable () -> Bool = { [weak self] in self?.isCurrent(e) ?? false }
         let poller = self.poller
         let onBackground = self.onBackground
         Task {
-            await poller.stop()
+            await poller.stop(if: current)
             await onBackground()
         }
     }
@@ -173,6 +201,7 @@ public final class LifecycleCoordinator: @unchecked Sendable {
         foregroundObserver = nil
         backgroundObserver = nil
         started = false
+        epoch &+= 1  // invalidate every pending foreground/background Task
         let center = provider.notificationCenter
         lock.unlock()
 
