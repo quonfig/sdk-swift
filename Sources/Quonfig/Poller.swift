@@ -114,6 +114,20 @@ public actor Poller {
         t.resume()
     }
 
+    /// `start(interval:)` only if `shouldStart` still holds when this runs on the
+    /// actor, so the check and the start cannot be split by another lifecycle
+    /// event (qfg-goi1.10.13).
+    func start(interval: TimeInterval, if shouldStart: @Sendable () -> Bool) {
+        guard shouldStart() else { return }
+        start(interval: interval)
+    }
+
+    /// `stop()` only if `shouldStop` still holds when this runs on the actor.
+    func stop(if shouldStop: @Sendable () -> Bool) {
+        guard shouldStop() else { return }
+        stop()
+    }
+
     /// Stop polling. Cancels the dispatch source on its own queue (Statsig #29),
     /// bumps the generation so timer ticks scheduled before the stop are
     /// ignored, and drops any armed follow-up. An in-flight fetch still runs to

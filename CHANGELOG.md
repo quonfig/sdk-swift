@@ -8,6 +8,14 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 
 ### Fixed
 
+- **A foreground catch-up could restart polling after `shutdown()` or after
+  the app went back to the background (qfg-goi1.10.13, patch).** The
+  foreground handler fetched, then started the poll timer, with no check that
+  it was still current. A background or `shutdown()` that happened while that
+  catch-up fetch was in flight was undone when it landed, so the timer polled
+  in the background or after shutdown. Each lifecycle event now carries an
+  epoch: the timer is started or stopped only by the latest event of a started
+  client.
 - **One malformed evaluation rejected the whole envelope (qfg-goi1.2.26,
   minor).** An entry with a `null` value, a missing field or a non-object body
   failed the decode for every flag, so that fetch was dropped and the app kept

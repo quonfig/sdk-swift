@@ -145,6 +145,96 @@ final class LifecycleTests: XCTestCase {
         XCTAssertEqual(after, before, "no fetch should fire after stop() removes observers")
     }
 
+    // MARK: - lifecycle epoch (qfg-goi1.10.13)
+
+    /// Opens once; every waiter (current and future) then proceeds.
+    private actor Gate {
+        private var open = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        func wait() async {
+            if open { return }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+
+        func release() {
+            open = true
+            waiters.forEach { $0.resume() }
+            waiters = []
+        }
+    }
+
+    func testForegroundCatchUpDoesNotRestartPollingAfterBackground() async {
+        let center = NotificationCenter()
+        let gate = Gate()
+        let fetches = Counter()
+        let poller = Poller(fetch: {
+            await fetches.bump()
+            await gate.wait()
+        })
+        let coord = LifecycleCoordinator(
+            provider: makeProvider(center: center), poller: poller, pollInterval: 100)
+        coord.start()
+        _ = await eventually { await poller.isRunning }
+        center.post(name: Self.bgName, object: nil)
+        _ = await eventually { await poller.isRunning == false }
+
+        center.post(name: Self.fgName, object: nil)
+        _ = await eventually { await fetches.current() >= 1 }  // catch-up in flight
+        center.post(name: Self.bgName, object: nil)  // backgrounded again
+        _ = await eventually { await poller.isRunning == false }
+
+        await gate.release()  // the stale foreground catch-up lands
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        let running = await poller.isRunning
+        XCTAssertFalse(running, "a stale foreground catch-up must not restart polling in the background")
+        coord.stop()
+    }
+
+    func testForegroundCatchUpDoesNotRestartPollingAfterStop() async {
+        let center = NotificationCenter()
+        let gate = Gate()
+        let fetches = Counter()
+        let poller = Poller(fetch: {
+            await fetches.bump()
+            await gate.wait()
+        })
+        let coord = LifecycleCoordinator(
+            provider: makeProvider(center: center), poller: poller, pollInterval: 100)
+        coord.start()
+        _ = await eventually { await poller.isRunning }
+        center.post(name: Self.bgName, object: nil)
+        _ = await eventually { await poller.isRunning == false }
+
+        center.post(name: Self.fgName, object: nil)
+        _ = await eventually { await fetches.current() >= 1 }  // catch-up in flight
+        coord.stop()  // shutdown
+        _ = await eventually { await poller.isRunning == false }
+
+        await gate.release()  // the catch-up lands after shutdown
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        let running = await poller.isRunning
+        XCTAssertFalse(running, "a foreground catch-up must not restart polling after shutdown")
+    }
+
+    func testStaleBackgroundStopDoesNotStopANewerForeground() async {
+        let center = NotificationCenter()
+        let poller = Poller(fetch: {})
+        let coord = LifecycleCoordinator(
+            provider: makeProvider(center: center), poller: poller, pollInterval: 100)
+        coord.start()
+        _ = await eventually { await poller.isRunning }
+        // Rapid background -> foreground: polling must end up running.
+        for _ in 0..<20 {
+            center.post(name: Self.bgName, object: nil)
+            center.post(name: Self.fgName, object: nil)
+        }
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        let running = await poller.isRunning
+        XCTAssertTrue(running, "the last lifecycle event (foreground) wins")
+        coord.stop()
+    }
+
     // MARK: - nil notifications (Linux/no-platform): timer just runs, no crash
 
     func testNilNotificationsStillStartsTimer() async {
