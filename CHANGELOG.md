@@ -4,6 +4,17 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 `Sources/Quonfig/Version.swift`; a `vX.Y.Z` tag is the release (see
 `RELEASING.md`).
 
+## Unreleased
+
+### Fixed
+
+- **One malformed evaluation rejected the whole envelope (qfg-goi1.2.26,
+  minor).** An entry with a `null` value, a missing field or a non-object body
+  failed the decode for every flag, so that fetch was dropped and the app kept
+  stale or cached values (or got nothing at init). Entries now decode per key,
+  like sdk-go and sdk-javascript: a bad entry resolves like an absent key
+  (caller default, `details` reason `ERROR`) and the other flags still load.
+
 ## 0.3.0 - 2026-10-09
 
 `updateContext` never serves or caches the previous user's values under a new

@@ -136,4 +136,38 @@ final class ConfigDecoderTests: XCTestCase {
         XCTAssertEqual(EvaluationReason(wire: "ERROR"), .error)
         XCTAssertEqual(EvaluationReason(wire: "totally-unknown"), .error)
     }
+
+    // MARK: Per-key decode (qfg-goi1.2.26)
+
+    /// One malformed entry must not reject the envelope: the other flags still
+    /// load and the bad key resolves like an absent one (caller default,
+    /// details reason ERROR), matching sdk-go and sdk-javascript.
+    func testOneMalformedEvaluationDoesNotRejectTheEnvelope() async throws {
+        var root = try fixtureJSON("eval-with-context.response.json")
+        var evals = root["evaluations"] as! [String: Any]
+        let goodKeys = Set(evals.keys).subtracting(["new-checkout"])
+        var bad = evals["new-checkout"] as! [String: Any]
+        bad["value"] = NSNull()
+        evals["new-checkout"] = bad
+        evals["missing-fields"] = ["value": ["type": "bool", "value": true]]
+        evals["not-an-object"] = "nope"
+        root["evaluations"] = evals
+
+        let env = try JSONDecoder().decode(EvalEnvelope.self, from: try encode(root))
+        XCTAssertEqual(Set(env.evaluations.keys), goodKeys)
+
+        let store = Store()
+        await store.apply(env)
+        XCTAssertEqual(store.details("new-checkout").reason, .error)
+        XCTAssertFalse(store.isEnabled("new-checkout"))
+        for key in goodKeys {
+            XCTAssertNotEqual(store.details(key).reason, .error, key)
+        }
+    }
+
+    func testEnvelopeWithoutEvaluationsObjectStillFails() throws {
+        var root = try fixtureJSON("eval-with-context.response.json")
+        root["evaluations"] = "nope"
+        XCTAssertThrowsError(try JSONDecoder().decode(EvalEnvelope.self, from: try encode(root)))
+    }
 }
