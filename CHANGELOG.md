@@ -4,6 +4,18 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 `Sources/Quonfig/Version.swift`; a `vX.Y.Z` tag is the release (see
 `RELEASING.md`).
 
+## Unreleased
+
+### Fixed
+
+- **`initTimeout` did not bound `initialize()` when the first fetch hung
+  (qfg-goi1.2.33, minor).** The first fetch and the timeout were raced in a task
+  group, which waits for every child, so a hung request held `initialize()` until
+  URLSession gave up (60s or more) instead of resolving on defaults after
+  `initTimeout` (default 5s) as documented. `initialize()` now returns at
+  whichever comes first. The slow fetch keeps running and still applies when it
+  lands, unless `updateContext` has switched away from its context.
+
 ## 0.3.0 - 2026-10-09
 
 `updateContext` never serves or caches the previous user's values under a new
