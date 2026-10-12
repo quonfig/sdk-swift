@@ -287,19 +287,50 @@ final class ContextSwitchTests: XCTestCase {
         await q.shutdown()
     }
 
+    // MARK: - qfg-goi1.2.33: initTimeout bounds initialize when the first fetch hangs
+
+    func testInitTimeoutBoundsInitializeWhenFirstFetchHangs() async throws {
+        let alice = user("alice")
+        let mock = ContextMockClient()
+        try mock.route(alice, who: "alice", gen: 10)
+        let gate = mock.hold("alice")
+        let persistence = Persistence(store: InMemoryFallbackStore())
+
+        // Race initialize against a watchdog so a regression fails instead of
+        // hanging the suite (the held fetch never finishes on its own).
+        let returned = expectation(description: "initialize returns")
+        let started = Date()
+        let box = ClientBox()
+        Task {
+            box.client = await self.makeClient(
+                mock: mock, context: alice, persistence: persistence, initTimeout: 0.1)
+            returned.fulfill()
+        }
+        await fulfillment(of: [returned], timeout: 2)
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertLessThan(elapsed, 1.5, "README: initialize resolves after a bounded initTimeout")
+        XCTAssertTrue(box.client?.isReady ?? false, "init resolves ready, on defaults")
+        XCTAssertEqual(box.client?.string("who", default: "default"), "default")
+
+        // The slow fetch keeps running and still lands for the current context.
+        await gate.release()
+        await eventually { box.client?.string("who", default: "default") == "alice" }
+        XCTAssertEqual(box.client?.string("who", default: "default"), "alice")
+        await box.client?.shutdown()
+    }
+
+    final class ClientBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _client: Quonfig?
+        var client: Quonfig? {
+            get { lock.lock(); defer { lock.unlock() }; return _client }
+            set { lock.lock(); defer { lock.unlock() }; _client = newValue }
+        }
+    }
+
     // MARK: - F1 (init variant): the init fetch outlives initTimeout
 
     func testInitFetchLandingAfterUpdateContextIsDiscarded() async throws {
-        // initialize() cannot return before its first fetch finishes today, so
-        // this scenario is unreachable until initTimeout really bounds init.
-        // Remove this skip when qfg-goi1.2.33 lands; it then verifies end to end
-        // that the init fetch goes through the same context check as the poll.
-        // (Verified red->green for qfg-goi1.2.3 with a local, uncommitted
-        // initTimeout patch.)
-        try XCTSkipIf(
-            true,
-            "qfg-goi1.2.33: initTimeout does not bound initialize when the first fetch hangs, "
-                + "so the init fetch cannot outlive initialize yet")
         let alice = user("alice")
         let bob = user("bob")
         let mock = ContextMockClient()

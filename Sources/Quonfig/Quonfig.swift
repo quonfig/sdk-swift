@@ -312,22 +312,26 @@ public final class Quonfig: @unchecked Sendable {
             }
         }
 
-        let timeoutTask = Task { () -> Void in
-            try? await Task.sleep(nanoseconds: sleepNanoseconds(timeout))
+        // Resume init from whichever of fetch / timeout finishes first
+        // (qfg-goi1.2.33). A task group cannot do this: it joins every child,
+        // and awaiting an unstructured Task's value ignores cancellation, so a
+        // hung fetch would hold initialize past initTimeout. The fetch is NOT
+        // cancelled: a slow fetch keeps running and still lands (through the
+        // same context check as the poll).
+        let first = ResumeOnce()
+        var timeoutTask: Task<Void, Never>?
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            first.arm(continuation)
+            Task {
+                _ = await fetchTask.value
+                first.resume()
+            }
+            timeoutTask = Task {
+                try? await Task.sleep(nanoseconds: sleepNanoseconds(timeout))
+                first.resume()
+            }
         }
-
-        // Wait for whichever finishes first. We await the timeout, then check the
-        // fetch; if the fetch already completed we're done immediately, otherwise
-        // we let it keep running in the background (its result still applies).
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask { _ = await fetchTask.value }
-            group.addTask { await timeoutTask.value }
-            // Return after the FIRST child finishes (init unblocks), cancel the
-            // outstanding timeout but NOT the fetch (let a slow fetch still land).
-            _ = await group.next()
-            timeoutTask.cancel()
-            group.cancelAll()
-        }
+        timeoutTask?.cancel()
 
         // If neither cache nor network produced an envelope, flip the store to
         // ready with an empty envelope so getters return caller defaults rather
@@ -515,5 +519,29 @@ private final class ContextBox: @unchecked Sendable {
     var value: QuonfigContext {
         get { lock.lock(); defer { lock.unlock() }; return _value }
         set { lock.lock(); _value = newValue; lock.unlock() }
+    }
+}
+
+/// Resumes a continuation exactly once, from whichever caller gets there first.
+final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var resumed = false
+
+    func arm(_ continuation: CheckedContinuation<Void, Never>) {
+        lock.lock()
+        let alreadyResumed = resumed
+        if !alreadyResumed { self.continuation = continuation }
+        lock.unlock()
+        if alreadyResumed { continuation.resume() }
+    }
+
+    func resume() {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        resumed = true
+        lock.unlock()
+        pending?.resume()
     }
 }
