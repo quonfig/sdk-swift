@@ -83,6 +83,14 @@ Notes:
   and on `updateContext`, and suspends polling in the background on iOS. macOS
   has no background state, so a macOS app polls continuously, including while
   another app is frontmost.
+- A **rejected SDK key** slows polling down. When a poll cycle gets 401, 403,
+  404 or 410 from the primary API URL and no URL accepts the request, the SDK
+  logs one ERROR (`config fetch rejected: the SDK key is invalid or revoked`,
+  with the status and host, never the key) and then retries once every
+  max(150-300s, `pollInterval`), with no backoff growth and no give-up. The
+  first accepted fetch (200 or 304 on any URL) logs one INFO and polling
+  resumes at `pollInterval`. Retries log at DEBUG. The init fetch, the
+  foreground catch-up and the `updateContext` refetch never enter this state.
 - `updateContext` stops serving the previous context's values at once: until
   the refetch lands you get the new context's cached values (if it was seen
   before) or your caller-supplied defaults, never the previous user's values. A
