@@ -30,7 +30,7 @@ jobs:
         working-directory: sdk-swift
     steps:
       - name: Checkout sdk-swift
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           path: sdk-swift
 
@@ -42,7 +42,7 @@ jobs:
       # tag that contains tests/duration/grammar.yaml.
       # See integration-test-data/RELEASING.md.
       - name: Checkout integration-test-data
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: quonfig/integration-test-data
           path: integration-test-data
@@ -115,7 +115,7 @@ jobs:
             destination: "platform=macOS"
     steps:
       - name: Checkout sdk-swift
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Select Xcode
         run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -n1)"
