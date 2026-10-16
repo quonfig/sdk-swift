@@ -4,7 +4,14 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 `Sources/Quonfig/Version.swift`; a `vX.Y.Z` tag is the release (see
 `RELEASING.md`).
 
-## Unreleased
+## 0.4.0 - 2026-10-16
+
+`initialize()` now honors `initTimeout` when the first fetch hangs
+(qfg-goi1.2.33); one malformed evaluation no longer drops the whole envelope
+(qfg-goi1.2.26); a rejected SDK key slows polling and logs one ERROR
+(qfg-goi1.10.30); a foreground catch-up can no longer restart polling after
+`shutdown()` or a return to the background (qfg-goi1.10.13). See the upgrade
+note below.
 
 > **UPGRADE (minor):** retry cadence and log levels change after a rejected
 > 401/403/404/410 fetch cycle; a revoked key logs one config ERROR. Polling
