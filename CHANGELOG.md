@@ -6,6 +6,29 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 
 ## Unreleased
 
+> **UPGRADE (minor):** retry cadence and log levels change after a rejected
+> 401/403/404/410 fetch cycle; a revoked key logs one config ERROR. Polling
+> slows to one retry every max(150-300s, `pollInterval`) until a fetch is
+> accepted, instead of retrying silently every `pollInterval`.
+
+### Changed
+
+- **A rejected SDK key slows polling and logs one ERROR (qfg-goi1.10.30,
+  minor).** Before, a revoked or wrong key kept polling every `pollInterval`
+  (60s by default) forever and logged nothing. Now a poll cycle in which the
+  primary API URL answers 401, 403, 404 or 410 and no URL answers 200 or 304
+  puts the SDK in an auth-failed state: one ERROR (`config fetch rejected: the
+  SDK key is invalid or revoked (check the SDK key)`, with `status` and
+  `host`, never the key), then one retry across every URL each max(T,
+  `pollInterval`), T uniform in 150-300s and re-drawn each time, with no
+  doubling and no give-up. Rejected retries log at DEBUG. The first 200 or 304
+  on any URL (a secondary-only 200 counts) installs the envelope, logs one INFO
+  and resumes polling at `pollInterval`. A later rejected cycle enters again.
+  A primary 503 with a secondary 401 does not enter. The init fetch, the
+  foreground catch-up and the `updateContext` refetch never enter; going to the
+  background and back keeps the slow cadence. Failover now records each URL's
+  HTTP status; the error `Loader.load()` throws is unchanged.
+
 ### Fixed
 
 - **A foreground catch-up could restart polling after `shutdown()` or after

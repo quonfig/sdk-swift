@@ -176,7 +176,10 @@ public final class Quonfig: @unchecked Sendable {
         lifecycleProvider: LifecycleProvider,
         initTimeout: TimeInterval,
         fingerprint: @escaping ContextFingerprintFn,
-        backgroundTaskRunner: BackgroundTaskRunner = ExpiringActivityRunner()
+        backgroundTaskRunner: BackgroundTaskRunner = ExpiringActivityRunner(),
+        pollScheduler: PollScheduler = DispatchPollScheduler(
+            queue: DispatchQueue(label: "com.quonfig.sdk.poller")),
+        authProbeDelay: @escaping @Sendable () -> TimeInterval = { Poller.randomAuthProbeDelay() }
     ) async -> Quonfig {
         let store = Store()
 
@@ -213,7 +216,9 @@ public final class Quonfig: @unchecked Sendable {
                 fingerprint: fingerprint)
         }
 
-        let poller = Poller(fetch: fetch)
+        let poller = Poller(
+            fetch: fetch, scheduler: pollScheduler, logSink: configuration.logSink,
+            authProbeDelay: authProbeDelay)
 
         // Background flush hook (policy P8): inside a ~5s background task, write
         // the live telemetry window to disk, then POST it once (disk before

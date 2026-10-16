@@ -96,9 +96,11 @@ public struct Configuration: Sendable {
     public var telemetryMaxEvaluationSummaries: Int
 
     /// Where the SDK writes its own diagnostic log lines (telemetry transport
-    /// state changes and data loss). `nil` (default) logs through `os.Logger`
-    /// (subsystem `com.quonfig.sdk`, category `Telemetry`), where DEBUG lines
-    /// are not persisted unless you enable them.
+    /// state changes and data loss, and the rejected-SDK-key ERROR / INFO /
+    /// DEBUG lines from polling). `nil` (default) logs through `os.Logger`
+    /// (subsystem `com.quonfig.sdk`, category `Telemetry` for telemetry and
+    /// `Quonfig` for polling), where DEBUG lines are not persisted unless you
+    /// enable them.
     public var logSink: QuonfigLogSink?
 
     public init(

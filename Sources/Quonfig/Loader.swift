@@ -54,6 +54,29 @@ public enum QuonfigLoaderError: Error, Sendable, Equatable {
     case notModifiedWithoutCache
 }
 
+/// One failover leg's outcome: its index in `apiURLs` and the HTTP status it
+/// returned (`0` when no HTTP response came back: a transport error or timeout).
+struct LegStatus: Sendable, Equatable {
+    let index: Int
+    let status: Int
+}
+
+/// A fetch cycle in which every leg failed and the primary (first) leg answered
+/// with an auth-class status (401/403/404/410), with no 2xx or 304 on any leg
+/// (qfg-goi1.10.30, plan 2026-10-07-sdk-auth-failure-rule.md R1). Thrown only
+/// by `loadForCurrentContext`, for the poller's auth-failure rule; the public
+/// `load()` rethrows `underlying`, so its error is unchanged.
+struct AuthRejectedError: Error, Sendable {
+    /// The primary leg's status.
+    let status: Int
+    /// The primary API host as `host:port`. Never the SDK key.
+    let host: String
+    /// Every leg's outcome, in order.
+    let legs: [LegStatus]
+    /// The error `load()` throws for the same cycle.
+    let underlying: QuonfigLoaderError
+}
+
 /// Result of a `Loader.load`.
 ///
 /// `envelope` ALWAYS holds the evaluations for the context that was just
@@ -193,7 +216,11 @@ public actor Loader {
     /// Load the envelope, trying each API URL in order (failover) and returning
     /// the first success. Mirrors `loader.ts` `loadWithFailover`.
     public func load() async throws -> LoaderResult {
-        try await loadForCurrentContext().result
+        do {
+            return try await loadForCurrentContext().result
+        } catch let rejected as AuthRejectedError {
+            throw rejected.underlying
+        }
     }
 
     /// `load()`, plus the context the request was built for (qfg-goi1.2.3).
@@ -206,18 +233,49 @@ public actor Loader {
     func loadForCurrentContext() async throws -> (context: QuonfigContext, result: LoaderResult) {
         let context = self.context
         var lastError: Error?
-        for apiURL in apiURLs {
+        var legs: [LegStatus] = []
+        for (index, apiURL) in apiURLs.enumerated() {
+            var status = 0
             do {
-                return (context, try await fetch(from: apiURL, context: context))
+                return (context, try await fetch(from: apiURL, context: context, status: &status))
             } catch {
                 lastError = error
+                legs.append(LegStatus(index: index, status: status))
             }
         }
         let message = lastError.map { "\($0)" } ?? "All API URLs failed"
-        throw QuonfigLoaderError.allURLsFailed(message)
+        let underlying = QuonfigLoaderError.allURLsFailed(message)
+        // Auth class (R1): the primary answered 401/403/404/410 and no leg
+        // answered 2xx or 304 (a 2xx that failed to decode, or a 304 with no
+        // cached body, still proves the key was accepted).
+        if let primary = legs.first, primary.index == 0, Loader.isAuthClass(primary.status),
+            !legs.contains(where: { (200..<300).contains($0.status) || $0.status == 304 })
+        {
+            throw AuthRejectedError(
+                status: primary.status, host: Loader.hostPort(apiURLs[0]), legs: legs,
+                underlying: underlying)
+        }
+        throw underlying
     }
 
-    private func fetch(from apiURL: URL, context: QuonfigContext) async throws -> LoaderResult {
+    /// 401/403/404/410: the statuses that say the SDK key is invalid or revoked.
+    static func isAuthClass(_ status: Int) -> Bool {
+        status == 401 || status == 403 || status == 404 || status == 410
+    }
+
+    /// `host:port` of an API base, with the scheme's default port when the URL
+    /// has none. Carries no credentials (the key travels in a header).
+    static func hostPort(_ url: URL) -> String {
+        let host = url.host ?? "unknown"
+        let port = url.port ?? (url.scheme == "http" ? 80 : 443)
+        return "\(host):\(port)"
+    }
+
+    /// One leg. `status` is set to the HTTP status as soon as a response
+    /// arrives, so the caller sees it even when this throws.
+    private func fetch(
+        from apiURL: URL, context: QuonfigContext, status: inout Int
+    ) async throws -> LoaderResult {
         let url = try url(apiURL: apiURL, context: context)
         let key = url.absoluteString
 
@@ -247,6 +305,7 @@ public actor Loader {
         guard let http = response as? HTTPURLResponse else {
             throw QuonfigLoaderError.nonHTTPResponse
         }
+        status = http.statusCode
 
         // 304 AND 204 are both "no change, no body re-download" (Unleash #24).
         if http.statusCode == 304 || http.statusCode == 204 {
