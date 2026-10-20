@@ -164,12 +164,16 @@ final class AuthFailureTests: XCTestCase {
             sdkKey: config.sdkKey,
             context: QuonfigContext(["user": ["key": .string("u_1")]]),
             apiURLs: urls, client: server)
-        let client = await Quonfig.make(
+        // `.continue` with one init attempt (the init retry backoff outlasts
+        // the timeout), so a failing first fetch still returns a client whose
+        // poll loop these tests drive.
+        let client = try await Quonfig.make(
             configuration: config, context: QuonfigContext(["user": ["key": .string("u_1")]]),
             loader: loader, persistence: Persistence(store: InMemoryFallbackStore()), aggregator: nil,
             lifecycleProvider: QuonfigClientTests.ManualLifecycleProvider(center: center),
-            initTimeout: 5, fingerprint: defaultContextFingerprint,
-            pollScheduler: scheduler, authProbeDelay: { delays.next() })
+            onInitFailure: .continue, initTimeout: 0.2, fingerprint: defaultContextFingerprint,
+            pollScheduler: scheduler, authProbeDelay: { delays.next() },
+            initRetryBackoff: { _ in 60 })
         // lifecycle.start() arms the poll cadence from a Task; wait for it.
         try await waitFor { scheduler.live.count == 1 }
         return Rig(client: client, server: server, scheduler: scheduler, logs: logs, center: center)

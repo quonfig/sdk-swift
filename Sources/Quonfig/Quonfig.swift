@@ -20,11 +20,13 @@ import Foundation
 ///     flushed every 60s and on background, retained on disk (qfg-2t2d.8,
 ///     transport policy qfg-y8je.12).
 ///
-/// `initialize` is `async throws` and **resolves once the first envelope is
-/// available** — from the network, or, after a bounded `initTimeout`, from the
-/// cold-start cache / empty defaults (the LD `startWaitSeconds` pattern,
-/// §2.11). Reads are synchronous and never block (served from the in-memory
-/// `Store` snapshot, §2.4).
+/// `initialize` is `async throws` and **resolves once config is available**:
+/// from the network, or, after a bounded `initTimeout`, from the cold-start
+/// disk cache (a cached copy counts as config). With neither, the
+/// `onInitFailure` mode decides: `.fail` (the default) throws, `.wait` keeps
+/// waiting, `.continue` starts on code defaults (qfg-9p4i.11). Reads are
+/// synchronous and never block (served from the in-memory `Store` snapshot,
+/// §2.4).
 public final class Quonfig: @unchecked Sendable {
     private let configuration: Configuration
     private let loader: Loader
@@ -34,6 +36,7 @@ public final class Quonfig: @unchecked Sendable {
     private let persistence: Persistence?
     private let aggregator: SummaryAggregator?
     private let fingerprintFn: ContextFingerprintFn
+    private let initState: InitState
 
     /// Serializes `updateContext` calls, so two overlapping switches cannot leave
     /// the loader on one context and the store tagged with another.
@@ -63,7 +66,8 @@ public final class Quonfig: @unchecked Sendable {
         lifecycle: LifecycleCoordinator,
         persistence: Persistence?,
         aggregator: SummaryAggregator?,
-        fingerprintFn: @escaping ContextFingerprintFn
+        fingerprintFn: @escaping ContextFingerprintFn,
+        initState: InitState
     ) {
         self.configuration = configuration
         self.contextBox = ContextBox(context)
@@ -74,6 +78,7 @@ public final class Quonfig: @unchecked Sendable {
         self.persistence = persistence
         self.aggregator = aggregator
         self.fingerprintFn = fingerprintFn
+        self.initState = initState
         self.envKey = Quonfig.envKey(for: configuration)
     }
 
@@ -99,17 +104,27 @@ public final class Quonfig: @unchecked Sendable {
     /// Behavior:
     ///   1. Serve any **cold-start cache** for this context synchronously, so reads
     ///      return last-known values before the first network round-trip (§2.7).
-    ///   2. Race the first network fetch against `initTimeout`. On success, apply
-    ///      the fresh envelope and persist it. On timeout/failure, fall back to the
-    ///      cache (already applied) or empty defaults — `initialize` still resolves
-    ///      (the LD `startWaitSeconds` pattern; a hung init blocks the UI, §2.11).
-    ///   3. Start the lifecycle-driven poll loop and the telemetry flush loop.
+    ///   2. Fetch the first envelope, retrying with jittered backoff (0.5s, 1s,
+    ///      2s, ... capped at 30s) until `initTimeout`. On success, apply and
+    ///      persist it. When the timeout passes (or the SDK key is rejected):
+    ///      - with a cached copy, start on it, in every mode (it counts as config);
+    ///      - `.fail` (default), no cache: throw `QuonfigInitError` (`.timeout`,
+    ///        `.unavailable` or `.unauthorized`); nothing keeps running;
+    ///      - `.wait`, no cache: keep retrying, with no upper bound;
+    ///      - `.continue`, no cache: return; getters serve code defaults
+    ///        (`source == .defaults`, `isReady == false`) until a config lands.
+    ///      Under `.continue` with a cached copy, `initialize` returns at once.
+    ///   3. Start the lifecycle-driven poll loop and the telemetry flush loop. A
+    ///      client that returned without a network config keeps retrying there
+    ///      and heals when delivery answers.
     ///
     /// - Parameters:
     ///   - sdkKey: convenience — if `options` is omitted, a default `Configuration`
     ///     is built from this key. If `options` is supplied, its `sdkKey` wins.
     ///   - context: the multi-namespace evaluation context.
     ///   - options: full init options. Defaults to `Configuration(sdkKey:)`.
+    ///   - onInitFailure: what to do when no config (network or cache) arrives
+    ///     within `initTimeout`. Default `.fail`.
     ///   - initTimeout: bounded wait for the first network envelope (default 5s).
     ///   - fingerprint: injectable context→cache-key function (Statsig's
     ///     `customCacheKey` lesson). Defaults to SHA256-of-canonical-JSON.
@@ -118,6 +133,7 @@ public final class Quonfig: @unchecked Sendable {
         sdkKey: String? = nil,
         context: QuonfigContext,
         options: Configuration? = nil,
+        onInitFailure: OnInitFailure = .fail,
         initTimeout: TimeInterval = 5,
         fingerprint: @escaping ContextFingerprintFn = defaultContextFingerprint
     ) async throws -> Quonfig {
@@ -150,13 +166,14 @@ public final class Quonfig: @unchecked Sendable {
                 logSink: configuration.logSink)
         }
 
-        return await make(
+        return try await make(
             configuration: configuration,
             context: context,
             loader: loader,
             persistence: persistence,
             aggregator: aggregator,
             lifecycleProvider: SystemLifecycleProvider(),
+            onInitFailure: onInitFailure,
             initTimeout: initTimeout,
             fingerprint: fingerprint
         )
@@ -174,14 +191,19 @@ public final class Quonfig: @unchecked Sendable {
         persistence: Persistence?,
         aggregator: SummaryAggregator?,
         lifecycleProvider: LifecycleProvider,
+        onInitFailure: OnInitFailure = .fail,
         initTimeout: TimeInterval,
         fingerprint: @escaping ContextFingerprintFn,
         backgroundTaskRunner: BackgroundTaskRunner = ExpiringActivityRunner(),
         pollScheduler: PollScheduler = DispatchPollScheduler(
             queue: DispatchQueue(label: "com.quonfig.sdk.poller")),
-        authProbeDelay: @escaping @Sendable () -> TimeInterval = { Poller.randomAuthProbeDelay() }
-    ) async -> Quonfig {
+        authProbeDelay: @escaping @Sendable () -> TimeInterval = { Poller.randomAuthProbeDelay() },
+        initRetryBackoff: @escaping @Sendable (Int) -> TimeInterval = { InitRetry.backoff(attempt: $0) },
+        now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    ) async throws -> Quonfig {
         let store = Store()
+        let log: QuonfigLogSink = configuration.logSink ?? OSLogSink()
+        let initState = InitState(now: now, log: log)
 
         // Wire telemetry (the only client-side telemetry component is the
         // evaluation-summary aggregator — context shapes/examples are server-side
@@ -201,8 +223,13 @@ public final class Quonfig: @unchecked Sendable {
 
         // 1. Cold-start: serve the cached envelope for this context synchronously
         //    (no flicker) before the network returns (§2.7).
+        let hasCache: Bool
         if let cached = persistence?.load(envKey: envKey, fingerprint: initialFingerprint) {
             await store.apply(cached)
+            initState.setSource(.cache)
+            hasCache = true
+        } else {
+            hasCache = false
         }
 
         // The poller's fetch closure pulls one envelope through the loader for
@@ -211,9 +238,14 @@ public final class Quonfig: @unchecked Sendable {
         // if that context is still current (qfg-goi1.2.3).
         let fetch: Poller.Fetch = { [weak store, weak persistence] in
             guard let store else { return }
-            try await fetchApplyPersist(
-                loader: loader, store: store, persistence: persistence, envKey: envKey,
-                fingerprint: fingerprint)
+            do {
+                try await fetchApplyPersist(
+                    loader: loader, store: store, persistence: persistence, envKey: envKey,
+                    fingerprint: fingerprint, initState: initState)
+            } catch {
+                initState.backgroundFailure(summary: await loader.lastFailureSummary)
+                throw error
+            }
         }
 
         let poller = Poller(
@@ -246,20 +278,14 @@ public final class Quonfig: @unchecked Sendable {
             lifecycle: lifecycle,
             persistence: persistence,
             aggregator: aggregator,
-            fingerprintFn: fingerprint
+            fingerprintFn: fingerprint,
+            initState: initState
         )
 
-        // 2. Race the first fetch against the bounded init timeout. Whichever
-        //    finishes first lets `initialize` return; the loser is ignored. On
-        //    success the envelope is applied + persisted; on timeout/failure the
-        //    already-applied cache (or empty defaults) stands.
-        await client.firstFetchOrTimeout(
-            loader: loader,
-            store: store,
-            persistence: persistence,
-            envKey: envKey,
-            timeout: initTimeout
-        )
+        // 2. Wait for the first config (spec B.3), then apply onInitFailure.
+        try await client.awaitFirstConfig(
+            mode: onInitFailure, hasCache: hasCache, timeout: initTimeout,
+            backoff: initRetryBackoff, now: now, log: log)
 
         // 3. Start the poll cadence (lifecycle assumes foreground at launch) and
         //    the telemetry flush loop.
@@ -283,11 +309,13 @@ public final class Quonfig: @unchecked Sendable {
         store: Store,
         persistence: Persistence?,
         envKey: String,
-        fingerprint: ContextFingerprintFn
+        fingerprint: ContextFingerprintFn,
+        initState: InitState? = nil
     ) async throws -> Bool {
         let (context, result) = try await loader.loadForCurrentContext()
         let fp = fingerprint(context)
         guard await store.applyIfCurrent(result, contextTag: fp) else { return false }
+        initState?.networkApplied(version: result.envelope.meta.version)
         // Persist the fresh (or 304-confirmed) envelope under the fingerprint of
         // the context it was fetched for, so a later cold start / serve-on-error
         // has it.
@@ -295,64 +323,212 @@ public final class Quonfig: @unchecked Sendable {
         return true
     }
 
-    /// Race the first network fetch against a bounded timeout. Returns when either
-    /// completes; never throws (the cache / empty defaults are the fallback).
-    private func firstFetchOrTimeout(
-        loader: Loader,
-        store: Store,
-        persistence: Persistence?,
-        envKey: String,
-        timeout: TimeInterval
-    ) async {
+    /// Wait for the first config and apply the `onInitFailure` mode (spec
+    /// B.3, logging per spec C). Returns normally when the client should be
+    /// handed to the caller; throws `QuonfigInitError` under `.fail` with no
+    /// config at all.
+    private func awaitFirstConfig(
+        mode: OnInitFailure,
+        hasCache: Bool,
+        timeout: TimeInterval,
+        backoff: @escaping @Sendable (Int) -> TimeInterval,
+        now: @escaping @Sendable () -> TimeInterval,
+        log: QuonfigLogSink
+    ) async throws {
+        let loader = self.loader
+        let store = self.store
+        let persistence = self.persistence
+        let envKey = self.envKey
         let fingerprint = fingerprintFn
-        let fetchTask = Task { () -> Bool in
-            do {
-                // Same context check as the poll: if this fetch outlives
-                // initialize and the app switches context, it is discarded.
-                return try await Quonfig.fetchApplyPersist(
-                    loader: loader, store: store, persistence: persistence, envKey: envKey,
-                    fingerprint: fingerprint)
-            } catch {
-                return false
-            }
-        }
+        let state = initState
+        let timeoutText = formatTimeoutSetting(timeout)
+        log.emit(
+            level: .debug,
+            message: "[quonfig] init: fetching config (initTimeout=\(timeoutText), onInitFailure=\(mode.rawValue))")
 
-        // Resume init from whichever of fetch / timeout finishes first
-        // (qfg-goi1.2.33). A task group cannot do this: it joins every child,
-        // and awaiting an unstructured Task's value ignores cancellation, so a
-        // hung fetch would hold initialize past initTimeout. The fetch is NOT
-        // cancelled: a slow fetch keeps running and still lands (through the
-        // same context check as the poll).
-        let first = ResumeOnce()
-        var timeoutTask: Task<Void, Never>?
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            first.arm(continuation)
+        // `.continue` with a cached copy returns at once on the cache; one
+        // background fetch confirms it, and the poll loop keeps retrying.
+        if mode == .continue, hasCache {
             Task {
-                _ = await fetchTask.value
-                first.resume()
+                do {
+                    try await Quonfig.fetchApplyPersist(
+                        loader: loader, store: store, persistence: persistence, envKey: envKey,
+                        fingerprint: fingerprint, initState: state)
+                } catch {
+                    state.markDegraded()
+                    let errs = await loader.lastFailureSummary ?? "no response"
+                    log.emit(
+                        level: .warn,
+                        message: "[quonfig] init: config not loaded. onInitFailure=continue: serving cached config."
+                            + " Retrying in background. \(errs)")
+                }
             }
-            timeoutTask = Task {
-                try? await Task.sleep(nanoseconds: sleepNanoseconds(timeout))
-                first.resume()
+            return
+        }
+
+        let race = InitRace()
+        let start = now()
+        // Retries until a config lands, the key is rejected (except `.wait`
+        // with no cache), or the timeout ends the wait. An attempt in flight
+        // when the wait ends is not cancelled (except on a throw): it still
+        // lands through the same context check as the poll.
+        let attempts = Task {
+            var attempt = 0
+            var loggedFirstFailure = false
+            var loggedAuth = false
+            var lastProgress = start
+            while race.outcome == nil {
+                attempt += 1
+                do {
+                    _ = try await Quonfig.fetchApplyPersist(
+                        loader: loader, store: store, persistence: persistence, envKey: envKey,
+                        fingerprint: fingerprint, initState: state)
+                    race.finish(.loaded)
+                    return
+                } catch let rejected as AuthRejectedError {
+                    race.recordFailure()
+                    if mode != .wait || hasCache {
+                        race.finish(.unauthorized(status: rejected.status, host: rejected.host))
+                        return
+                    }
+                    if !loggedAuth {
+                        loggedAuth = true
+                        log.emit(
+                            level: .warn,
+                            message: "[quonfig] init: SDK key rejected (\(rejected.status)) by \(rejected.host)."
+                                + " Check the key and environment. onInitFailure=wait: retrying.")
+                    }
+                } catch {
+                    race.recordFailure()
+                }
+                if race.outcome != nil || Task.isCancelled { return }
+
+                let errs = await loader.lastFailureSummary ?? "no response"
+                let t = now()
+                if !loggedFirstFailure {
+                    loggedFirstFailure = true
+                    lastProgress = t
+                    log.emit(
+                        level: .warn,
+                        message:
+                            "[quonfig] init: config not loaded yet, retrying until initTimeout (\(timeoutText)). \(errs)"
+                    )
+                } else if race.pastTimeout {
+                    if t - lastProgress >= 30 {
+                        lastProgress = t
+                        log.emit(
+                            level: .warn,
+                            message: "[quonfig] init: still blocked waiting for config (\(formatElapsed(t - start))"
+                                + " elapsed, attempt \(attempt)). \(errs)")
+                    }
+                } else if t - lastProgress >= 5 {
+                    lastProgress = t
+                    log.emit(
+                        level: .warn,
+                        message: "[quonfig] init: still waiting for config (\(formatElapsed(t - start)) elapsed of"
+                            + " \(timeoutText), attempt \(attempt)). \(errs)")
+                }
+                try? await Task.sleep(nanoseconds: sleepNanoseconds(backoff(attempt)))
             }
         }
-        timeoutTask?.cancel()
 
-        // If neither cache nor network produced an envelope, flip the store to
-        // ready with an empty envelope so getters return caller defaults rather
-        // than hanging on `isReady == false` (LD startWaitSeconds fallback).
-        if !store.isReady {
-            await store.apply(
-                EvalEnvelope(
-                    evaluations: [:],
-                    meta: EvalMeta(version: "", environment: "", workspaceId: nil)))
+        // Resume from whichever of outcome / timeout comes first
+        // (qfg-goi1.2.33): never join the attempt task, so a hung fetch cannot
+        // hold initialize past initTimeout.
+        let timer = Task {
+            try? await Task.sleep(nanoseconds: sleepNanoseconds(timeout))
+            if Task.isCancelled { return }
+            race.markPastTimeout()
+            if mode == .wait, !hasCache {
+                let errs = await loader.lastFailureSummary ?? "no response"
+                log.emit(
+                    level: .warn,
+                    message: "[quonfig] init: no config after \(formatElapsed(now() - start))."
+                        + " onInitFailure=wait: still blocking startup and retrying indefinitely. \(errs)."
+                        + " Use onInitFailure=fail or continue to bound startup.")
+                return
+            }
+            race.finish(.timedOut(everFailed: race.everFailed))
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            race.gate.arm(continuation)
+        }
+        timer.cancel()
+
+        let outcome = race.outcome ?? .loaded
+        if outcome == .loaded { return }
+
+        let elapsed = formatElapsed(now() - start)
+        let errs = await loader.lastFailureSummary ?? "no response"
+        let why: String
+        switch outcome {
+        case .unauthorized(let status, let host):
+            why = "SDK key rejected (\(status)) by \(host)"
+        default:
+            why = "no config after \(elapsed)"
+        }
+
+        if hasCache {
+            // A cached copy counts as config (decision 2), in every mode.
+            state.markDegraded()
+            log.emit(
+                level: .warn,
+                message: "[quonfig] init: \(why). onInitFailure=\(mode.rawValue): STARTING ON cached config"
+                    + " (a cached copy counts as config). Retrying in background. \(errs)")
+            return
+        }
+
+        switch mode {
+        case .fail:
+            attempts.cancel()
+            let error: QuonfigInitError
+            switch outcome {
+            case .unauthorized(let status, let host):
+                error = .unauthorized
+                log.emit(
+                    level: .error,
+                    message: "[quonfig] init FAILED: SDK key rejected (\(status)) by \(host)."
+                        + " Check the key and environment. onInitFailure=fail: raising now.")
+            case .timedOut(let everFailed):
+                error = everFailed ? .unavailable : .timeout
+                log.emit(
+                    level: .error,
+                    message: "[quonfig] init FAILED: no config after \(elapsed). \(errs)."
+                        + " onInitFailure=fail: raising QuonfigInitError. Options: onInitFailure=wait to keep"
+                        + " waiting, onInitFailure=continue to start on code defaults, or raise initTimeout.")
+            case .loaded:
+                return
+            }
+            throw error
+        case .wait, .continue:
+            // `.wait` with no cache only ends on `.loaded`; anything else here
+            // is `.continue` (a client SDK logs this at WARN, spec C).
+            state.markDegraded()
+            log.emit(
+                level: .warn,
+                message: "[quonfig] init: \(why). onInitFailure=continue: STARTING ON CODE DEFAULTS."
+                    + " This instance may disagree with the rest of your fleet. Retrying in background. \(errs)")
         }
     }
 
     // MARK: - Synchronous typed getters (forward to the Store snapshot)
 
-    /// `true` once any envelope (network or cache) has been applied.
+    /// `true` once any envelope (network or cache) has been applied. `false`
+    /// while a client started under `.continue` serves code defaults.
     public var isReady: Bool { store.isReady }
+
+    /// Where the values served right now came from: `.network`, `.cache` (the
+    /// disk copy from an earlier run), or `.defaults` (caller code defaults).
+    public var source: QuonfigConfigSource { initState.source }
+
+    /// Suspend until `isReady` is `true`. Returns at once when it already is.
+    /// Useful after `initialize` returned under `.continue` on code defaults.
+    public func waitForReady() async {
+        let store = self.store
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            Task { await store.onReady { continuation.resume() } }
+        }
+    }
 
     /// Whether a flag is enabled (`value === true`; `false` otherwise).
     public func isEnabled(_ key: String, logExposure: Bool = true) -> Bool {
@@ -437,8 +613,10 @@ public final class Quonfig: @unchecked Sendable {
             // away (§2.7). Unconditional: the held generation watermark belongs to
             // the previous context, so the reject-older guard must not compare
             // against it. A no-op when `fp` is already the current context.
-            await self.store.resetForContextSwitch(
-                to: self.persistence?.load(envKey: self.envKey, fingerprint: fp), contextTag: fp)
+            let cached = self.persistence?.load(envKey: self.envKey, fingerprint: fp)
+            if await self.store.resetForContextSwitch(to: cached, contextTag: fp) {
+                self.initState.setSource(cached == nil ? .defaults : .cache)
+            }
         }
 
         // Immediate refetch for the new context. If a fetch for the old context
@@ -479,6 +657,16 @@ public final class Quonfig: @unchecked Sendable {
 public enum QuonfigInitError: Error, Sendable, Equatable {
     /// Neither an `sdkKey` nor an `options` carrying one was supplied.
     case missingSDKKey
+    /// `onInitFailure: .fail`, no cached copy, and the first fetch was still
+    /// in flight when `initTimeout` passed.
+    case timeout
+    /// `onInitFailure: .fail`, no cached copy, and every attempt within
+    /// `initTimeout` failed (delivery unreachable or erroring).
+    case unavailable
+    /// `onInitFailure: .fail`, no cached copy, and the primary rejected the
+    /// SDK key (401/403/404/410) with no API URL accepting it. Raised at once,
+    /// without waiting out `initTimeout`.
+    case unauthorized
 }
 
 /// A FIFO async mutex. Actors are reentrant across `await`, so an actor method

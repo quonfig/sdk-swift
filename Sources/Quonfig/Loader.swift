@@ -128,6 +128,12 @@ public actor Loader {
     /// (qfg-2t2d.6) can switch identities between polls.
     private var context: QuonfigContext
 
+    /// The last fetch cycle's per-leg failures, for the init log lines
+    /// (`primary=<host:port>: <error>; secondary=...`). Hosts and short error
+    /// classes only: never the SDK key or the context-carrying request URL.
+    /// `nil` until a cycle fails; cleared by a successful cycle.
+    private(set) var lastFailureSummary: String?
+
     /// Per-URL `{ etag, envelope }` cache from prior 200 responses, keyed by the
     /// FULL request URL string (which embeds the encoded context). Keying per-URL
     /// is the safety invariant (mirrors loader.ts): an ETag is only ever replayed
@@ -234,15 +240,21 @@ public actor Loader {
         let context = self.context
         var lastError: Error?
         var legs: [LegStatus] = []
+        var summary: [String] = []
         for (index, apiURL) in apiURLs.enumerated() {
             var status = 0
             do {
-                return (context, try await fetch(from: apiURL, context: context, status: &status))
+                let result = try await fetch(from: apiURL, context: context, status: &status)
+                lastFailureSummary = nil
+                return (context, result)
             } catch {
                 lastError = error
                 legs.append(LegStatus(index: index, status: status))
+                summary.append(
+                    "\(Loader.legName(index))=\(Loader.hostPort(apiURL)): \(Loader.shortError(error, status: status))")
             }
         }
+        lastFailureSummary = summary.joined(separator: "; ")
         let message = lastError.map { "\($0)" } ?? "All API URLs failed"
         let underlying = QuonfigLoaderError.allURLsFailed(message)
         // Auth class (R1): the primary answered 401/403/404/410 and no leg
@@ -256,6 +268,27 @@ public actor Loader {
                 underlying: underlying)
         }
         throw underlying
+    }
+
+    /// `primary`, `secondary`, then `url3`, `url4`, ... for the log lines.
+    static func legName(_ index: Int) -> String {
+        switch index {
+        case 0: return "primary"
+        case 1: return "secondary"
+        default: return "url\(index + 1)"
+        }
+    }
+
+    /// A short, credential-free description of one leg's failure. A raw
+    /// `URLError` description carries the request URL, whose path encodes the
+    /// context, so only its code is kept.
+    static func shortError(_ error: Error, status: Int) -> String {
+        let accepted = (200..<300).contains(status) || status == 304
+        if status > 0, !accepted { return "HTTP \(status)" }
+        if let urlError = error as? URLError { return "URLError \(urlError.code.rawValue)" }
+        if let loaderError = error as? QuonfigLoaderError { return "\(loaderError)" }
+        if error is DecodingError { return "HTTP \(status): undecodable response" }
+        return String(describing: type(of: error))
     }
 
     /// 401/403/404/410: the statuses that say the SDK key is invalid or revoked.

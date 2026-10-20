@@ -42,9 +42,9 @@ final class LoggingTests: XCTestCase {
 
     // MARK: - Gate against a resolved config
 
-    func testShouldLogGatesAtConfiguredThreshold() async {
+    func testShouldLogGatesAtConfiguredThreshold() async throws {
         // Threshold WARN → suppress TRACE/DEBUG/INFO, emit WARN/ERROR/FATAL.
-        let q = await makeClient(logLevel: "WARN")
+        let q = try await makeClient(logLevel: "WARN")
 
         XCTAssertFalse(q.shouldLog(.trace, loggerKey: Self.loggerKey))
         XCTAssertFalse(q.shouldLog(.debug, loggerKey: Self.loggerKey))
@@ -56,9 +56,9 @@ final class LoggingTests: XCTestCase {
         XCTAssertEqual(q.logLevelThreshold(for: Self.loggerKey), .warn)
     }
 
-    func testShouldLogIsPermissiveWhenConfigAbsent() async {
+    func testShouldLogIsPermissiveWhenConfigAbsent() async throws {
         // No log-level config resolved → log everything (sdk-go: !ok → return true).
-        let q = await makeClient(logLevel: nil)
+        let q = try await makeClient(logLevel: nil)
 
         XCTAssertNil(q.logLevelThreshold(for: Self.loggerKey))
         for level in QuonfigLogLevel.allCases {
@@ -68,17 +68,17 @@ final class LoggingTests: XCTestCase {
         }
     }
 
-    func testShouldLogIsPermissiveWhenConfiguredLevelIsUnknown() async {
+    func testShouldLogIsPermissiveWhenConfiguredLevelIsUnknown() async throws {
         // A garbage value on the wire → unparseable → permissive (Go's rank == -1).
-        let q = await makeClient(logLevel: "loud")
+        let q = try await makeClient(logLevel: "loud")
         XCTAssertNil(q.logLevelThreshold(for: Self.loggerKey))
         XCTAssertTrue(q.shouldLog(.trace, loggerKey: Self.loggerKey))
     }
 
     // MARK: - QuonfigLogger emits the contiguous tail (probe-5 shape)
 
-    func testLoggerEmitsContiguousTailAboveThreshold() async {
-        let q = await makeClient(logLevel: "WARN")
+    func testLoggerEmitsContiguousTailAboveThreshold() async throws {
+        let q = try await makeClient(logLevel: "WARN")
         let sink = CaptureSink()
         let logger = QuonfigLogger(quonfig: q, loggerKey: Self.loggerKey, sink: sink)
 
@@ -97,9 +97,9 @@ final class LoggingTests: XCTestCase {
         XCTAssertEqual(sink.emitted, Array(ladder.suffix(sink.emitted.count)))
     }
 
-    func testLoggerDoesNotEvaluateSuppressedMessages() async {
+    func testLoggerDoesNotEvaluateSuppressedMessages() async throws {
         // Laziness: a suppressed record must not build its (autoclosure) message.
-        let q = await makeClient(logLevel: "ERROR")
+        let q = try await makeClient(logLevel: "ERROR")
         let sink = CaptureSink()
         let logger = QuonfigLogger(quonfig: q, loggerKey: Self.loggerKey, sink: sink)
 
@@ -118,7 +118,7 @@ final class LoggingTests: XCTestCase {
     /// Build a real `Quonfig` whose store holds (optionally) a `log_level` config
     /// at `loggerKey`. Network is forced to fail so `make` resolves instantly to an
     /// empty store; we then apply a hand-built envelope directly (public inits).
-    private func makeClient(logLevel: String?) async -> Quonfig {
+    private func makeClient(logLevel: String?) async throws -> Quonfig {
         let config = Configuration(
             sdkKey: "qf_ck_test",
             apiURLs: [URL(string: "https://primary.quonfig.com")!],
@@ -129,10 +129,10 @@ final class LoggingTests: XCTestCase {
         let loader = Loader(
             sdkKey: config.sdkKey, context: ctx, apiURLs: [config.apiURLs!.first!],
             collectContextMode: config.collectContextMode, client: mock)
-        let q = await Quonfig.make(
+        let q = try await Quonfig.make(
             configuration: config, context: ctx, loader: loader,
             persistence: nil, aggregator: nil,
-            lifecycleProvider: NoopLifecycleProvider(), initTimeout: 0.1,
+            lifecycleProvider: NoopLifecycleProvider(), onInitFailure: .continue, initTimeout: 0.1,
             fingerprint: defaultContextFingerprint)
 
         if let logLevel {

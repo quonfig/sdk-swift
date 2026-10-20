@@ -279,12 +279,15 @@ public actor Store {
     /// the same user): the held snapshot already belongs to it, and the cache
     /// may lag memory (a failed `Persistence.save`), so reinstalling from disk
     /// could flash defaults.
-    func resetForContextSwitch(to cached: EvalEnvelope?, contextTag tag: String) {
-        guard contextTag != tag else { return }
+    /// Returns whether it switched (`false` for the same-context no-op).
+    @discardableResult
+    func resetForContextSwitch(to cached: EvalEnvelope?, contextTag tag: String) -> Bool {
+        guard contextTag != tag else { return false }
         contextTag = tag
         let envelope =
             cached ?? EvalEnvelope(evaluations: [:], meta: EvalMeta(version: "", environment: ""))
         install(envelope, rejectOlder: false)
+        return true
     }
 
     /// Pull one envelope from the loader and apply it. Returns whether the

@@ -81,8 +81,9 @@ final class QuonfigClientTests: XCTestCase {
         lifecycleProvider: LifecycleProvider? = nil,
         collectSummaries: Bool = false,
         pollInterval: TimeInterval = 0,  // 0 = no background polling during the test
+        onInitFailure: OnInitFailure = .fail,
         initTimeout: TimeInterval = 5
-    ) async -> Quonfig {
+    ) async throws -> Quonfig {
         let config = Configuration(
             sdkKey: "qf_ck_test", apiURLs: [URL(string: "https://primary.quonfig.com")!],
             telemetryURL: URL(string: "https://telemetry.quonfig.com")!,
@@ -91,10 +92,10 @@ final class QuonfigClientTests: XCTestCase {
             sdkKey: config.sdkKey, context: context, apiURLs: [config.apiURLs!.first!],
             collectContextMode: config.collectContextMode, client: mock)
         let provider = lifecycleProvider ?? ManualLifecycleProvider(center: NotificationCenter())
-        return await Quonfig.make(
+        return try await Quonfig.make(
             configuration: config, context: context, loader: loader,
             persistence: persistence, aggregator: nil,
-            lifecycleProvider: provider, initTimeout: initTimeout,
+            lifecycleProvider: provider, onInitFailure: onInitFailure, initTimeout: initTimeout,
             fingerprint: defaultContextFingerprint)
     }
 
@@ -102,7 +103,7 @@ final class QuonfigClientTests: XCTestCase {
 
     func testInitializeAndTypedGetters() async throws {
         let mock = MockClient([.init(status: 200, headers: ["ETag": "e1"], body: try evalBody())])
-        let q = await makeClient(mock: mock, context: sampleContext())
+        let q = try await makeClient(mock: mock, context: sampleContext())
 
         XCTAssertTrue(q.isReady)
         // Each getter coerces from the fixture's `{type,value}` pairs.
@@ -140,7 +141,7 @@ final class QuonfigClientTests: XCTestCase {
             .init(status: 200, headers: ["ETag": "e1"], body: try evalBody()),
             .init(status: 200, headers: ["ETag": "e2"], body: mutated),
         ])
-        let q = await makeClient(mock: mock, context: sampleContext())
+        let q = try await makeClient(mock: mock, context: sampleContext())
 
         let fired = FireCount()
         // Hold the token — a dropped token deinits and cancels the subscription.
@@ -173,7 +174,7 @@ final class QuonfigClientTests: XCTestCase {
             .init(status: 200, headers: ["ETag": "e1"], body: try evalBody()),
             .init(status: 200, headers: ["ETag": "e2"], body: mutated),
         ])
-        let q = await makeClient(
+        let q = try await makeClient(
             mock: mock, context: sampleContext(), pollInterval: 0)
 
         XCTAssertEqual(q.int("rate-limit", default: 0), 250)
@@ -199,7 +200,7 @@ final class QuonfigClientTests: XCTestCase {
         // Network always fails; init must still resolve and serve the cache.
         let mock = MockClient([])
         mock.alwaysThrow = true
-        let q = await makeClient(
+        let q = try await makeClient(
             mock: mock, context: ctx, persistence: persistence,
             pollInterval: 0, initTimeout: 0.2)
 
@@ -208,16 +209,19 @@ final class QuonfigClientTests: XCTestCase {
         XCTAssertEqual(q.string("button-color", default: "x"), "green")
     }
 
-    // MARK: init resolves (empty defaults) with no cache and a failing network
+    // MARK: .continue resolves on code defaults with no cache and a failing network
+    // (the default .fail throws instead: InitFailureTests, qfg-9p4i.11)
 
     func testInitResolvesToDefaultsWithNoCacheNoNetwork() async throws {
         let mock = MockClient([])
         mock.alwaysThrow = true
-        let q = await makeClient(
-            mock: mock, context: sampleContext(), pollInterval: 0, initTimeout: 0.2)
+        let q = try await makeClient(
+            mock: mock, context: sampleContext(), pollInterval: 0, onInitFailure: .continue,
+            initTimeout: 0.2)
 
-        // Ready (so reads return caller defaults rather than hanging), but empty.
-        XCTAssertTrue(q.isReady)
+        // Returns, serving caller defaults; not ready (no config yet).
+        XCTAssertFalse(q.isReady)
+        XCTAssertEqual(q.source, .defaults)
         XCTAssertFalse(q.isEnabled("new-checkout"))
         XCTAssertEqual(q.int("rate-limit", default: 42), 42)
     }
@@ -229,7 +233,7 @@ final class QuonfigClientTests: XCTestCase {
     /// now clamped, so init simply waits for the first fetch.
     func testInfiniteInitTimeoutDoesNotTrap() async throws {
         let mock = MockClient([.init(status: 200, headers: ["ETag": "e1"], body: try evalBody())])
-        let q = await makeClient(mock: mock, context: sampleContext(), initTimeout: .infinity)
+        let q = try await makeClient(mock: mock, context: sampleContext(), initTimeout: .infinity)
         XCTAssertTrue(q.isReady)
         XCTAssertTrue(q.isEnabled("new-checkout"))
     }
@@ -282,7 +286,7 @@ final class QuonfigClientTests: XCTestCase {
             },"meta":{"version":"1","environment":"production"}}
             """.utf8)
         let mock = MockClient([.init(status: 200, headers: [:], body: body)])
-        let q = await makeClient(mock: mock, context: sampleContext())
+        let q = try await makeClient(mock: mock, context: sampleContext())
 
         XCTAssertEqual(q.duration("timeout", default: 0), 108_121.5)
         XCTAssertEqual(q.duration("bad-timeout", default: 9), 9)
