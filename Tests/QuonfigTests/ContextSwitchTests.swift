@@ -127,16 +127,17 @@ final class ContextSwitchTests: XCTestCase {
         mock: ContextMockClient,
         context: QuonfigContext,
         persistence: Persistence,
+        onInitFailure: OnInitFailure = .fail,
         initTimeout: TimeInterval = 5
-    ) async -> Quonfig {
+    ) async throws -> Quonfig {
         let loader = Loader(
             sdkKey: configuration.sdkKey, context: context, apiURLs: configuration.apiURLs!,
             collectContextMode: configuration.collectContextMode, client: mock)
-        return await Quonfig.make(
+        return try await Quonfig.make(
             configuration: configuration, context: context, loader: loader,
             persistence: persistence, aggregator: nil,
             lifecycleProvider: QuonfigClientTests.ManualLifecycleProvider(center: NotificationCenter()),
-            initTimeout: initTimeout,
+            onInitFailure: onInitFailure, initTimeout: initTimeout,
             fingerprint: defaultContextFingerprint)
     }
 
@@ -170,7 +171,7 @@ final class ContextSwitchTests: XCTestCase {
         try mock.route(bob, who: "bob", gen: 10)
         let persistence = Persistence(store: InMemoryFallbackStore())
 
-        let q = await makeClient(mock: mock, context: alice, persistence: persistence)
+        let q = try await makeClient(mock: mock, context: alice, persistence: persistence)
         XCTAssertEqual(q.string("who", default: "default"), "alice")
 
         // Hold alice's next poll open, then switch to bob while it is in flight.
@@ -218,7 +219,7 @@ final class ContextSwitchTests: XCTestCase {
             envelope: Self.envelope(who: "carol-cached", gen: 10), envKey: envKey,
             fingerprint: defaultContextFingerprint(carol))
 
-        let q = await makeClient(mock: mock, context: alice, persistence: persistence)
+        let q = try await makeClient(mock: mock, context: alice, persistence: persistence)
         XCTAssertEqual(q.string("who", default: "default"), "alice")
 
         // Switch to bob; bob's refetch hangs (a slow login fetch).
@@ -268,7 +269,7 @@ final class ContextSwitchTests: XCTestCase {
         try mock.route(alice, who: "alice", gen: 10)
         let persistence = Persistence(store: DroppingStore())
 
-        let q = await makeClient(mock: mock, context: alice, persistence: persistence)
+        let q = try await makeClient(mock: mock, context: alice, persistence: persistence)
         XCTAssertEqual(q.string("who", default: "default"), "alice")
         XCTAssertNil(persistedWho(persistence, alice), "precondition: the save failed")
 
@@ -302,14 +303,16 @@ final class ContextSwitchTests: XCTestCase {
         let started = Date()
         let box = ClientBox()
         Task {
-            box.client = await self.makeClient(
-                mock: mock, context: alice, persistence: persistence, initTimeout: 0.1)
+            box.client = try? await self.makeClient(
+                mock: mock, context: alice, persistence: persistence, onInitFailure: .continue,
+                initTimeout: 0.1)
             returned.fulfill()
         }
         await fulfillment(of: [returned], timeout: 2)
         let elapsed = Date().timeIntervalSince(started)
         XCTAssertLessThan(elapsed, 1.5, "README: initialize resolves after a bounded initTimeout")
-        XCTAssertTrue(box.client?.isReady ?? false, "init resolves ready, on defaults")
+        XCTAssertEqual(box.client?.source, .defaults, "init resolves on defaults (.continue)")
+        XCTAssertFalse(box.client?.isReady ?? true, "not ready until a config lands")
         XCTAssertEqual(box.client?.string("who", default: "default"), "default")
 
         // The slow fetch keeps running and still lands for the current context.
@@ -340,7 +343,8 @@ final class ContextSwitchTests: XCTestCase {
 
         // alice's init fetch hangs past initTimeout: init resolves on defaults.
         let gate = mock.hold("alice")
-        let q = await makeClient(mock: mock, context: alice, persistence: persistence, initTimeout: 0.05)
+        let q = try await makeClient(
+            mock: mock, context: alice, persistence: persistence, onInitFailure: .continue, initTimeout: 0.05)
         XCTAssertEqual(q.string("who", default: "default"), "default")
 
         try await q.updateContext(bob)
@@ -372,7 +376,7 @@ final class ContextSwitchTests: XCTestCase {
             envelope: Self.envelope(who: "bob-cached", gen: 5), envKey: envKey,
             fingerprint: defaultContextFingerprint(bob))
 
-        let q = await makeClient(mock: mock, context: alice, persistence: persistence)
+        let q = try await makeClient(mock: mock, context: alice, persistence: persistence)
         XCTAssertEqual(q.string("who", default: "default"), "alice")
 
         mock.offline = true
@@ -393,7 +397,7 @@ final class ContextSwitchTests: XCTestCase {
         try mock.route(carol, who: "carol", gen: 10)
         let persistence = Persistence(store: InMemoryFallbackStore())
 
-        let q = await makeClient(mock: mock, context: alice, persistence: persistence)
+        let q = try await makeClient(mock: mock, context: alice, persistence: persistence)
         XCTAssertEqual(q.string("who", default: "default"), "alice")
 
         mock.offline = true

@@ -4,6 +4,60 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 `Sources/Quonfig/Version.swift`; a `vX.Y.Z` tag is the release (see
 `RELEASING.md`).
 
+## Unreleased
+
+`initialize` now fails by default when there is no config at all
+(qfg-9p4i.11, minor). New `onInitFailure: .fail | .wait | .continue`, a
+`source` property and `waitForReady()`. See the upgrade note below.
+
+> **UPGRADE (minor, pre-1.0 behavior change):** an app with no cached copy and
+> Quonfig delivery unreachable now gets an error from `initialize()` instead of
+> a client serving code defaults. A cached copy on disk still counts as config,
+> so returning users start on it as before. To keep the old behavior, pass
+> `onInitFailure: .continue`. Under `.continue` with no cache, `isReady` is now
+> `false` (and `source` is `.defaults`) until a config lands; before, an empty
+> envelope was installed and `isReady` was `true`. `QuonfigInitError` gains the
+> cases `.timeout`, `.unavailable` and `.unauthorized`, so an exhaustive
+> `switch` over it needs updating.
+
+### Changed
+
+- **The default startup-failure mode is `.fail` (qfg-9p4i.11).** When
+  `initTimeout` (default 5s) passes with no network config and no cached copy,
+  `initialize` throws `QuonfigInitError.timeout` (the first fetch is still
+  hanging) or `.unavailable` (every attempt failed). A rejected SDK key
+  (401/403/404/410 from the primary, no URL accepting it) throws
+  `.unauthorized` at once instead of waiting out the timeout. No client is
+  returned, so no poll loop or telemetry keeps running.
+- **`initialize` retries before the timeout.** It retries the first fetch with
+  jittered backoff (0.5s, 1s, 2s, ... capped at 30s) instead of making one
+  attempt.
+- **`.continue` with a cached copy returns at once** on the cache and confirms
+  it with one background fetch; the poll loop keeps retrying.
+- **`waitForReady()` is cancellation-safe.** Cancelling the waiting task
+  returns it promptly (with `isReady` still `false`) and removes its queued
+  callback; it used to hang until a config arrived.
+- **`shutdown()` cancels init work still in flight** (an init attempt pending
+  when `initialize` returned, and the `.continue`-with-cache confirm fetch), so
+  it cannot land a config or write the disk cache after shutdown.
+
+### Added
+
+- `onInitFailure:` on `Quonfig.initialize` with `.fail` (default), `.wait`
+  (keep waiting with no upper bound) and `.continue` (start on code defaults;
+  alias `.continueWithDefaults`). In every mode a cached copy counts as config:
+  at the timeout the client starts on it.
+- `Quonfig.source` (`.network`, `.cache`, `.defaults`) and
+  `Quonfig.waitForReady()`.
+- Startup logging per the cross-SDK contract, prefixed `[quonfig]`: DEBUG at
+  init start, WARN on the first failed attempt and every 5s of waiting, ERROR
+  when `.fail` raises, WARN when `.wait` keeps blocking or `.continue` starts
+  on cache or defaults, a WARN every 30s (every 5 minutes after the first 5)
+  while a degraded client still cannot connect, and one INFO when it recovers.
+  Lines name the API hosts and a short error class per leg
+  (`primary=<host:port>: URLError -1009`), never the SDK key or the
+  context-carrying request URL.
+
 ## 0.4.0 - 2026-10-16
 
 `initialize()` now honors `initTimeout` when the first fetch hangs

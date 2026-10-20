@@ -162,6 +162,10 @@ public actor Store {
     /// when the store becomes ready, then cleared (plan §2.10 Statsig #1/#36 —
     /// "reads-before-init register, then replay on ready, not silently dropped").
     private var pendingReadyCallbacks: [@Sendable () -> Void] = []
+    /// Removable ready waiters (`Quonfig.waitForReady`), keyed so a cancelled
+    /// wait can take its callback back out instead of leaving it queued.
+    private var readyWaiters: [UInt64: @Sendable () -> Void] = [:]
+    private var nextReadyWaiterID: UInt64 = 0
 
     /// Fingerprint of the context the held snapshot belongs to (qfg-goi1.2.3).
     /// `nil` for a standalone store that is never context-tagged. Set by the
@@ -279,12 +283,15 @@ public actor Store {
     /// the same user): the held snapshot already belongs to it, and the cache
     /// may lag memory (a failed `Persistence.save`), so reinstalling from disk
     /// could flash defaults.
-    func resetForContextSwitch(to cached: EvalEnvelope?, contextTag tag: String) {
-        guard contextTag != tag else { return }
+    /// Returns whether it switched (`false` for the same-context no-op).
+    @discardableResult
+    func resetForContextSwitch(to cached: EvalEnvelope?, contextTag tag: String) -> Bool {
+        guard contextTag != tag else { return false }
         contextTag = tag
         let envelope =
             cached ?? EvalEnvelope(evaluations: [:], meta: EvalMeta(version: "", environment: ""))
         install(envelope, rejectOlder: false)
+        return true
     }
 
     /// Pull one envelope from the loader and apply it. Returns whether the
@@ -333,9 +340,28 @@ public actor Store {
         }
     }
 
+    /// Like `onReady`, but returns an id `removeReadyWaiter` can use to drop
+    /// the queued callback. Returns `nil` when the store was already ready and
+    /// the callback has run.
+    func addReadyWaiter(_ callback: @escaping @Sendable () -> Void) -> UInt64? {
+        if snapshotBox.value.ready {
+            callback()
+            return nil
+        }
+        let id = nextReadyWaiterID
+        nextReadyWaiterID &+= 1
+        readyWaiters[id] = callback
+        return id
+    }
+
+    func removeReadyWaiter(_ id: UInt64) {
+        readyWaiters[id] = nil
+    }
+
     private func replayPendingReady() {
-        let callbacks = pendingReadyCallbacks
+        let callbacks = pendingReadyCallbacks + Array(readyWaiters.values)
         pendingReadyCallbacks.removeAll()
+        readyWaiters.removeAll()
         for cb in callbacks {
             cb()
         }
@@ -364,6 +390,8 @@ public actor Store {
     var subscriberCount: Int { subscribers.count }
     /// Test/inspection hook: queued reads-before-ready count.
     var pendingReadyCount: Int { pendingReadyCallbacks.count }
+    /// Test/inspection hook: queued `waitForReady` waiters.
+    var readyWaiterCount: Int { readyWaiters.count }
 
     // MARK: - Synchronous reads (served off-actor from the snapshot)
 

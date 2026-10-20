@@ -71,10 +71,32 @@ try await quonfig.updateContext(
 
 Notes:
 
-- `initialize` is `async throws` and **resolves once the first envelope is
-  available** — from the network, or, after a bounded `initTimeout` (default 5s),
-  from the cold-start cache / empty defaults (the LaunchDarkly `startWaitSeconds`
-  pattern). A hung network never hangs your UI.
+- `initialize` is `async throws` and **resolves once config is available**:
+  from the network, or, after a bounded `initTimeout` (default 5s), from the
+  cold-start disk cache (a cached copy counts as config). It retries with
+  backoff until the timeout. A hung network never hangs your UI past
+  `initTimeout`.
+- **Startup failure.** With no network answer and no cached copy,
+  `onInitFailure` decides what happens at the timeout:
+  - `.fail` (the default): `initialize` throws `QuonfigInitError.timeout`
+    (first fetch still hanging), `.unavailable` (every attempt failed) or
+    `.unauthorized` (the SDK key was rejected; thrown at once). No client is
+    returned, so nothing keeps running.
+  - `.wait`: keep waiting and retrying, with no upper bound.
+  - `.continue` (alias `.continueWithDefaults`): return, serving your
+    caller-supplied defaults. `isReady` stays `false` and `source` is
+    `.defaults` until a config lands; the poll loop keeps retrying and the
+    client heals on its own. With a cached copy, `.continue` returns at once.
+
+  ```swift
+  let q = try await Quonfig.initialize(
+      context: ctx, options: config, onInitFailure: .continue, initTimeout: 5)
+  if q.source == .defaults { /* running on code defaults */ }
+  await q.waitForReady()  // suspends until a config (network or cache) is applied
+  ```
+
+  `source` is `.network`, `.cache` or `.defaults`. Log lines are prefixed
+  `[quonfig]`, name the API hosts and never the SDK key.
 - Reads are **synchronous and never block** — they serve from an in-memory
   snapshot. An absent key (or a not-yet-ready store) returns the caller-supplied
   default.

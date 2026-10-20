@@ -714,7 +714,7 @@ final class TelemetryTransportTests: XCTestCase {
     }
     // MARK: Client wiring: background entry runs the flush in a background task
 
-    func testBackgroundNotificationFlushesInsideBackgroundTask() async {
+    func testBackgroundNotificationFlushesInsideBackgroundTask() async throws {
         stub.script([], then: .init(status: 200))
         let agg = makeAggregator()
         let center = NotificationCenter()
@@ -727,10 +727,11 @@ final class TelemetryTransportTests: XCTestCase {
         let loader = Loader(
             sdkKey: config.sdkKey, context: ctx, apiURLs: [config.apiURLs!.first!],
             collectContextMode: config.collectContextMode, client: OfflineClient())
-        let q = await Quonfig.make(
+        let q = try await Quonfig.make(
             configuration: config, context: ctx, loader: loader, persistence: nil, aggregator: agg,
             lifecycleProvider: BackgroundOnlyProvider(notificationCenter: center, backgroundNotification: bg),
-            initTimeout: 0.1, fingerprint: defaultContextFingerprint, backgroundTaskRunner: runner)
+            onInitFailure: .continue, initTimeout: 0.1, fingerprint: defaultContextFingerprint,
+            backgroundTaskRunner: runner)
 
         await record(agg, "bg")
         center.post(name: bg, object: nil)
