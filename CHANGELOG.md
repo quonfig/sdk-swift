@@ -34,6 +34,12 @@ All notable changes to the Quonfig Swift SDK. The version lives in
   attempt.
 - **`.continue` with a cached copy returns at once** on the cache and confirms
   it with one background fetch; the poll loop keeps retrying.
+- **`waitForReady()` is cancellation-safe.** Cancelling the waiting task
+  returns it promptly (with `isReady` still `false`) and removes its queued
+  callback; it used to hang until a config arrived.
+- **`shutdown()` cancels init work still in flight** (an init attempt pending
+  when `initialize` returned, and the `.continue`-with-cache confirm fetch), so
+  it cannot land a config or write the disk cache after shutdown.
 
 ### Added
 

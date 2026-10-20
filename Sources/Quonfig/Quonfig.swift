@@ -42,6 +42,11 @@ public final class Quonfig: @unchecked Sendable {
     /// the loader on one context and the store tagged with another.
     private let contextSwitchLock = AsyncSerialLock()
 
+    /// Background tasks `initialize` leaves running (an init attempt still in
+    /// flight when it returned, the `.continue`-with-cache confirm fetch).
+    /// `shutdown()` cancels them, so none lands a config on a stopped client.
+    private let initTasks = TaskBag()
+
     /// Cache namespace for `(envKey, contextFingerprint)` — distinguishes this
     /// client's SDK key / environment so two clients in one process never collide.
     private let envKey: String
@@ -349,20 +354,21 @@ public final class Quonfig: @unchecked Sendable {
         // `.continue` with a cached copy returns at once on the cache; one
         // background fetch confirms it, and the poll loop keeps retrying.
         if mode == .continue, hasCache {
-            Task {
-                do {
-                    try await Quonfig.fetchApplyPersist(
-                        loader: loader, store: store, persistence: persistence, envKey: envKey,
-                        fingerprint: fingerprint, initState: state)
-                } catch {
-                    state.markDegraded()
-                    let errs = await loader.lastFailureSummary ?? "no response"
-                    log.emit(
-                        level: .warn,
-                        message: "[quonfig] init: config not loaded. onInitFailure=continue: serving cached config."
-                            + " Retrying in background. \(errs)")
-                }
-            }
+            initTasks.add(
+                Task {
+                    do {
+                        try await Quonfig.fetchApplyPersist(
+                            loader: loader, store: store, persistence: persistence, envKey: envKey,
+                            fingerprint: fingerprint, initState: state)
+                    } catch {
+                        state.markDegraded()
+                        let errs = await loader.lastFailureSummary ?? "no response"
+                        log.emit(
+                            level: .warn,
+                            message: "[quonfig] init: config not loaded. onInitFailure=continue: serving cached config."
+                                + " Retrying in background. \(errs)")
+                    }
+                })
             return
         }
 
@@ -370,14 +376,15 @@ public final class Quonfig: @unchecked Sendable {
         let start = now()
         // Retries until a config lands, the key is rejected (except `.wait`
         // with no cache), or the timeout ends the wait. An attempt in flight
-        // when the wait ends is not cancelled (except on a throw): it still
-        // lands through the same context check as the poll.
+        // when the wait ends is not cancelled (except on a throw or a later
+        // `shutdown()`): it still lands through the same context check as the
+        // poll.
         let attempts = Task {
             var attempt = 0
             var loggedFirstFailure = false
             var loggedAuth = false
             var lastProgress = start
-            while race.outcome == nil {
+            while race.outcome == nil, !Task.isCancelled {
                 attempt += 1
                 do {
                     _ = try await Quonfig.fetchApplyPersist(
@@ -450,6 +457,7 @@ public final class Quonfig: @unchecked Sendable {
             }
             race.finish(.timedOut(everFailed: race.everFailed))
         }
+        initTasks.add(attempts)
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             race.gate.arm(continuation)
         }
@@ -523,11 +531,22 @@ public final class Quonfig: @unchecked Sendable {
 
     /// Suspend until `isReady` is `true`. Returns at once when it already is.
     /// Useful after `initialize` returned under `.continue` on code defaults.
+    ///
+    /// Cancellation-safe: if the calling task is cancelled (or already is),
+    /// this returns promptly with `isReady` still `false`, so check `isReady`
+    /// afterwards. To bound the wait, run it in a task you cancel on a timer.
     public func waitForReady() async {
-        let store = self.store
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            Task { await store.onReady { continuation.resume() } }
+        if store.isReady || Task.isCancelled { return }
+        let gate = ResumeOnce()
+        let waiter = await store.addReadyWaiter { gate.resume() }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                gate.arm(continuation)
+            }
+        } onCancel: {
+            gate.resume()
         }
+        if let waiter { await store.removeReadyWaiter(waiter) }
     }
 
     /// Whether a flag is enabled (`value === true`; `false` otherwise).
@@ -646,6 +665,7 @@ public final class Quonfig: @unchecked Sendable {
     /// final POST (written to disk first, ~5s budget; the retained queue is not
     /// drained), and remove the lifecycle observers. Idempotent.
     public func shutdown() async {
+        initTasks.cancelAll()
         lifecycle.stop()
         await poller.stop()
         await aggregator?.stop()
@@ -712,6 +732,32 @@ private final class ContextBox: @unchecked Sendable {
     var value: QuonfigContext {
         get { lock.lock(); defer { lock.unlock() }; return _value }
         set { lock.lock(); _value = newValue; lock.unlock() }
+    }
+}
+
+/// Holds cancellable tasks; `cancelAll` cancels every one added so far and
+/// any added later (so a task registered after `shutdown()` is cancelled too).
+final class TaskBag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var tasks: [Task<Void, Never>] = []
+    private var cancelled = false
+
+    func add(_ task: Task<Void, Never>) {
+        let cancelNow: Bool = lock.locked {
+            if cancelled { return true }
+            tasks.append(task)
+            return false
+        }
+        if cancelNow { task.cancel() }
+    }
+
+    func cancelAll() {
+        let pending: [Task<Void, Never>] = lock.locked {
+            cancelled = true
+            defer { tasks.removeAll() }
+            return tasks
+        }
+        for task in pending { task.cancel() }
     }
 }
 

@@ -17,6 +17,8 @@ final class InitFailureTests: XCTestCase {
             case status(Int)
             case offline
             case hang
+            /// Answers 200 after `seconds`, unless the calling task is cancelled.
+            case slowOK(Data, seconds: TimeInterval)
         }
         private let lock = NSLock()
         private var _count = 0
@@ -41,6 +43,9 @@ final class InitFailureTests: XCTestCase {
             case .hang:
                 try await Task.sleep(nanoseconds: 30_000_000_000)
                 throw URLError(.timedOut)
+            case .slowOK(let body, let seconds):
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return (body, HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: [:])!)
             }
         }
     }
@@ -255,6 +260,79 @@ final class InitFailureTests: XCTestCase {
         await q.refreshForTesting()
         XCTAssertEqual(logs.count(.warn, "still not connected to Quonfig delivery"), 2, "\(logs.all)")
         await q.shutdown()
+    }
+
+    /// `waitForReady` is cancellation-safe: cancelling the waiting task
+    /// returns it promptly even though the store never becomes ready.
+    func testWaitForReadyReturnsPromptlyWhenCancelled() async throws {
+        let client = ScriptedClient { _ in .offline }
+        let q = try await make(client, mode: .continue, initTimeout: 0.05)
+        XCTAssertFalse(q.isReady)
+        let waiter = Task { await q.waitForReady() }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        waiter.cancel()
+        let returned = expectation(description: "waitForReady returned after cancel")
+        Task {
+            await waiter.value
+            returned.fulfill()
+        }
+        await fulfillment(of: [returned], timeout: 1)
+        XCTAssertFalse(q.isReady)
+        let queued = await q.configStore.readyWaiterCount
+        XCTAssertEqual(queued, 0, "a cancelled wait left its callback queued on the store")
+        await q.shutdown()
+    }
+
+    /// `waitForReady` called from an already-cancelled task returns at once.
+    func testWaitForReadyReturnsAtOnceInACancelledTask() async throws {
+        let q = try await make(ScriptedClient { _ in .offline }, mode: .continue, initTimeout: 0.05)
+        let returned = expectation(description: "waitForReady returned")
+        Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            await q.waitForReady()
+            returned.fulfill()
+        }
+        await fulfillment(of: [returned], timeout: 1)
+        await q.shutdown()
+    }
+
+    /// `shutdown()` stops the `.continue` init retry loop: no fetch attempts
+    /// after it returns (the loop used to keep retrying with no cancel path).
+    func testShutdownStopsContinueModeInitRetries() async throws {
+        let client = ScriptedClient { _ in .offline }
+        let q = try await make(client, mode: .continue, initTimeout: 0.05)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertGreaterThan(client.count, 1, "the init retry loop should be running before shutdown")
+        await q.shutdown()
+        try await Task.sleep(nanoseconds: 30_000_000)  // let an in-flight attempt settle
+        let afterShutdown = client.count
+        try await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(client.count, afterShutdown, "init retries kept running after shutdown()")
+    }
+
+    /// An init attempt still in flight when `.continue` returns on code
+    /// defaults is cancelled by `shutdown()`: it does not land a config (or
+    /// write the disk cache) on a client that was shut down.
+    func testShutdownCancelsInFlightContinueModeInitAttempt() async throws {
+        let client = ScriptedClient { _ in .slowOK(InitFailureTests.body, seconds: 0.25) }
+        let q = try await make(client, mode: .continue, initTimeout: 0.05)
+        XCTAssertEqual(q.source, .defaults)
+        await q.shutdown()
+        try await Task.sleep(nanoseconds: 450_000_000)
+        XCTAssertFalse(q.isReady, "an init attempt landed a config after shutdown()")
+        XCTAssertEqual(q.source, .defaults)
+    }
+
+    /// The one background confirm fetch `.continue` fires when it starts on a
+    /// cached copy is cancelled by `shutdown()` too.
+    func testShutdownCancelsContinueWithCacheBackgroundFetch() async throws {
+        let client = ScriptedClient { _ in .slowOK(InitFailureTests.body, seconds: 0.25) }
+        let q = try await make(client, mode: .continue, persistence: try seededPersistence(), initTimeout: 5)
+        XCTAssertEqual(q.source, .cache)
+        await q.shutdown()
+        try await Task.sleep(nanoseconds: 450_000_000)
+        XCTAssertEqual(q.string("greeting", default: "code"), "cached", "the background fetch landed after shutdown()")
+        XCTAssertEqual(q.source, .cache)
     }
 
     // MARK: .wait
