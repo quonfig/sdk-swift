@@ -131,6 +131,11 @@ public final class Quonfig: @unchecked Sendable {
     ///   - onInitFailure: what to do when no config (network or cache) arrives
     ///     within `initTimeout`. Default `.fail`.
     ///   - initTimeout: bounded wait for the first network envelope (default 5s).
+    ///     Each attempt is a hedged primary+secondary fetch. A value `<= 0`
+    ///     (or NaN) runs exactly ONE attempt and then applies `onInitFailure`
+    ///     (`.fail` throws, `.continue` starts on the cache or code defaults,
+    ///     `.wait` keeps retrying). It never means "no deadline".
+    ///     `.infinity` means no deadline.
     ///   - fingerprint: injectable context→cache-key function (Statsig's
     ///     `customCacheKey` lesson). Defaults to SHA256-of-canonical-JSON.
     @discardableResult
@@ -374,6 +379,28 @@ public final class Quonfig: @unchecked Sendable {
 
         let race = InitRace()
         let start = now()
+        // `initTimeout <= 0` (or NaN) has no timer: exactly one attempt runs,
+        // then the policy applies (decision D3).
+        let oneAttempt = !(timeout > 0)
+
+        // The deadline: `.wait` with no cache keeps going; everything else
+        // ends the wait. The reason is the LAST attempt's (decision D2): a
+        // timeout when it hung (no leg failed fast, including an attempt still
+        // in flight) or none completed; otherwise unavailable.
+        let deadline: @Sendable () async -> Void = {
+            race.markPastTimeout()
+            if mode == .wait, !hasCache {
+                let errs = await loader.lastFailureSummary ?? "no response"
+                log.emit(
+                    level: .warn,
+                    message: "[quonfig] init: no config after \(formatElapsed(now() - start))."
+                        + " onInitFailure=wait: still blocking startup and retrying indefinitely. \(errs)."
+                        + " Use onInitFailure=fail or continue to bound startup.")
+                return
+            }
+            let hung = !(await loader.cycleHadFastFailure)
+            race.finish(.timedOut(hung: hung))
+        }
         // Retries until a config lands, the key is rejected (except `.wait`
         // with no cache), or the timeout ends the wait. An attempt in flight
         // when the wait ends is not cancelled (except on a throw or a later
@@ -392,8 +419,9 @@ public final class Quonfig: @unchecked Sendable {
                         fingerprint: fingerprint, initState: state)
                     race.finish(.loaded)
                     return
-                } catch let rejected as AuthRejectedError {
-                    race.recordFailure()
+                } catch let rejected as AuthRejectedError where rejected.everyLegRejected {
+                    // Every leg rejected the key (decision D1); a primary-only
+                    // rejection is an ordinary failed attempt.
                     if mode != .wait || hasCache {
                         race.finish(.unauthorized(status: rejected.status, host: rejected.host))
                         return
@@ -405,14 +433,16 @@ public final class Quonfig: @unchecked Sendable {
                             message: "[quonfig] init: SDK key rejected (\(rejected.status)) by \(rejected.host)."
                                 + " Check the key and environment. onInitFailure=wait: retrying.")
                     }
-                } catch {
-                    race.recordFailure()
-                }
+                } catch {}
                 if race.outcome != nil || Task.isCancelled { return }
+                if oneAttempt, attempt == 1 {
+                    await deadline()
+                    if race.outcome != nil { return }
+                }
 
                 let errs = await loader.lastFailureSummary ?? "no response"
                 let t = now()
-                if !loggedFirstFailure {
+                if !loggedFirstFailure, !oneAttempt {
                     loggedFirstFailure = true
                     lastProgress = t
                     log.emit(
@@ -443,19 +473,10 @@ public final class Quonfig: @unchecked Sendable {
         // (qfg-goi1.2.33): never join the attempt task, so a hung fetch cannot
         // hold initialize past initTimeout.
         let timer = Task {
+            if oneAttempt { return }
             try? await Task.sleep(nanoseconds: sleepNanoseconds(timeout))
             if Task.isCancelled { return }
-            race.markPastTimeout()
-            if mode == .wait, !hasCache {
-                let errs = await loader.lastFailureSummary ?? "no response"
-                log.emit(
-                    level: .warn,
-                    message: "[quonfig] init: no config after \(formatElapsed(now() - start))."
-                        + " onInitFailure=wait: still blocking startup and retrying indefinitely. \(errs)."
-                        + " Use onInitFailure=fail or continue to bound startup.")
-                return
-            }
-            race.finish(.timedOut(everFailed: race.everFailed))
+            await deadline()
         }
         initTasks.add(attempts)
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -497,8 +518,8 @@ public final class Quonfig: @unchecked Sendable {
                     level: .error,
                     message: "[quonfig] init FAILED: SDK key rejected (\(status)) by \(host)."
                         + " Check the key and environment. onInitFailure=fail: raising now.")
-            case .timedOut(let everFailed):
-                error = everFailed ? .unavailable : .timeout
+            case .timedOut(let hung):
+                error = hung ? .timeout : .unavailable
                 log.emit(
                     level: .error,
                     message: "[quonfig] init FAILED: no config after \(elapsed). \(errs)."
@@ -677,15 +698,17 @@ public final class Quonfig: @unchecked Sendable {
 public enum QuonfigInitError: Error, Sendable, Equatable {
     /// Neither an `sdkKey` nor an `options` carrying one was supplied.
     case missingSDKKey
-    /// `onInitFailure: .fail`, no cached copy, and the first fetch was still
-    /// in flight when `initTimeout` passed.
+    /// `onInitFailure: .fail`, no cached copy, and the last attempt hung at
+    /// `initTimeout` (every API URL in it timed out or was still in flight),
+    /// or no attempt completed.
     case timeout
-    /// `onInitFailure: .fail`, no cached copy, and every attempt within
-    /// `initTimeout` failed (delivery unreachable or erroring).
+    /// `onInitFailure: .fail`, no cached copy, and the last attempt within
+    /// `initTimeout` failed fast on at least one API URL (refused, DNS,
+    /// an HTTP error status).
     case unavailable
-    /// `onInitFailure: .fail`, no cached copy, and the primary rejected the
-    /// SDK key (401/403/404/410) with no API URL accepting it. Raised at once,
-    /// without waiting out `initTimeout`.
+    /// `onInitFailure: .fail`, no cached copy, and every configured API URL
+    /// rejected the SDK key (401/403/404/410). Raised at once, without waiting
+    /// out `initTimeout`. A rejection from the primary alone is not enough.
     case unauthorized
 }
 

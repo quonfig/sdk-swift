@@ -65,7 +65,8 @@ struct LegStatus: Sendable, Equatable {
 /// with an auth-class status (401/403/404/410), with no 2xx or 304 on any leg
 /// (qfg-goi1.10.30, plan 2026-10-07-sdk-auth-failure-rule.md R1). Thrown only
 /// by `loadForCurrentContext`, for the poller's auth-failure rule; the public
-/// `load()` rethrows `underlying`, so its error is unchanged.
+/// `load()` rethrows `underlying`, so its error is unchanged. The init decides
+/// "unauthorized" only when `everyLegRejected` (decision D1).
 struct AuthRejectedError: Error, Sendable {
     /// The primary leg's status.
     let status: Int
@@ -73,6 +74,8 @@ struct AuthRejectedError: Error, Sendable {
     let host: String
     /// Every leg's outcome, in order.
     let legs: [LegStatus]
+    /// Every configured leg answered auth-class (not just the primary).
+    let everyLegRejected: Bool
     /// The error `load()` throws for the same cycle.
     let underlying: QuonfigLoaderError
 }
@@ -98,7 +101,7 @@ public struct LoaderResult: Sendable, Equatable {
 }
 
 /// Fetches the `eval-with-context` envelope over HTTP with ETag/`If-None-Match`
-/// conditional GETs and ordered API-URL failover.
+/// conditional GETs and a hedged primary/secondary fetch.
 ///
 /// Mirrors `sdk-javascript/src/loader.ts`, with the iOS-specific ETag/304
 /// short-circuit (plan §2.11 drift table — JS has none yet; server support
@@ -133,6 +136,20 @@ public actor Loader {
     /// classes only: never the SDK key or the context-carrying request URL.
     /// `nil` until a cycle fails; cleared by a successful cycle.
     private(set) var lastFailureSummary: String?
+
+    /// Whether any leg of the current (or, between cycles, the last) fetch
+    /// cycle failed fast: a refusal, an HTTP status, an undecodable body. A
+    /// cycle with none hung: every leg that ended timed out, and any leg still
+    /// in flight is hanging (decision D2). `false` before the first cycle.
+    private(set) var cycleHadFastFailure = false
+
+    /// How long a fetch cycle waits on the legs in flight before it also fires
+    /// the next API URL (the hedge). Matches the other SDKs' 2s default.
+    static let defaultHedgeDelay: TimeInterval = 2
+    private(set) var hedgeDelay: TimeInterval = Loader.defaultHedgeDelay
+
+    /// Test hook: shorten the hedge delay.
+    func setHedgeDelay(_ delay: TimeInterval) { hedgeDelay = delay }
 
     /// Per-URL `{ etag, envelope }` cache from prior 200 responses, keyed by the
     /// FULL request URL string (which embeds the encoded context). Keying per-URL
@@ -219,8 +236,8 @@ public actor Loader {
         return u
     }
 
-    /// Load the envelope, trying each API URL in order (failover) and returning
-    /// the first success. Mirrors `loader.ts` `loadWithFailover`.
+    /// Load the envelope over a hedged fetch across the API URLs and return
+    /// the first success (see `loadForCurrentContext`).
     public func load() async throws -> LoaderResult {
         do {
             return try await loadForCurrentContext().result
@@ -229,45 +246,135 @@ public actor Loader {
         }
     }
 
+    /// One leg's event in a hedged fetch cycle.
+    private enum LegEvent: Sendable {
+        /// The leg finished: its status (`0` with no HTTP answer) and result.
+        case done(index: Int, status: Int, result: Result<LoaderResult, Error>)
+        /// The hedge delay passed: fire the next leg.
+        case hedge
+    }
+
     /// `load()`, plus the context the request was built for (qfg-goi1.2.3).
     ///
+    /// One cycle is a HEDGED fetch (spec 2026-10-05-init-failure-design.md,
+    /// "Where failover fits"; qfg-9p4i.17.8): the primary fires at once; the
+    /// next URL fires after `hedgeDelay`, or at once when every leg in flight
+    /// has failed. The primary is never cancelled by the hedge. The first
+    /// 2xx/304 wins and the other legs are cancelled. So a HUNG primary no
+    /// longer keeps the secondary from being tried before the init deadline.
+    ///
     /// The context is read once, before the first await, and used for every
-    /// failover leg. An `updateContext` that lands while this request is in
-    /// flight therefore cannot change which identity the result belongs to, and
-    /// the client compares the returned context with its current one before it
+    /// leg. An `updateContext` that lands while this request is in flight
+    /// therefore cannot change which identity the result belongs to, and the
+    /// client compares the returned context with its current one before it
     /// installs or persists the result.
     func loadForCurrentContext() async throws -> (context: QuonfigContext, result: LoaderResult) {
         let context = self.context
-        var lastError: Error?
-        var legs: [LegStatus] = []
-        var summary: [String] = []
-        for (index, apiURL) in apiURLs.enumerated() {
-            var status = 0
-            do {
-                let result = try await fetch(from: apiURL, context: context, status: &status)
-                lastFailureSummary = nil
-                return (context, result)
-            } catch {
-                lastError = error
-                legs.append(LegStatus(index: index, status: status))
-                summary.append(
-                    "\(Loader.legName(index))=\(Loader.hostPort(apiURL)): \(Loader.shortError(error, status: status))")
+        let urls = apiURLs
+        let delay = hedgeDelay
+        cycleHadFastFailure = false
+
+        var continuation: AsyncStream<LegEvent>.Continuation!
+        let events = AsyncStream<LegEvent> { continuation = $0 }
+        let sink = continuation!
+        var legTasks: [Task<Void, Never>] = []
+        var hedgeTask: Task<Void, Never>?
+        defer {
+            for task in legTasks { task.cancel() }
+            hedgeTask?.cancel()
+            sink.finish()
+        }
+
+        var next = 0
+        var inFlight = 0
+        func launchNext() {
+            let index = next
+            next += 1
+            inFlight += 1
+            let apiURL = urls[index]
+            legTasks.append(
+                Task {
+                    let event = await self.fetchLeg(index: index, apiURL: apiURL, context: context)
+                    sink.yield(event)
+                })
+            hedgeTask?.cancel()
+            hedgeTask = nil
+            if next < urls.count {
+                hedgeTask = Task {
+                    try? await Task.sleep(nanoseconds: sleepNanoseconds(delay))
+                    if !Task.isCancelled { sink.yield(.hedge) }
+                }
             }
         }
-        lastFailureSummary = summary.joined(separator: "; ")
-        let message = lastError.map { "\($0)" } ?? "All API URLs failed"
+
+        var failures: [(index: Int, status: Int, error: Error)] = []
+        launchNext()
+        // `AsyncStream` iteration ends on its own when the calling task is
+        // cancelled; the `defer` then cancels every leg.
+        loop: for await event in events {
+            switch event {
+            case .hedge:
+                if next < urls.count { launchNext() }
+            case .done(let index, let status, let result):
+                inFlight -= 1
+                switch result {
+                case .success(let value):
+                    lastFailureSummary = nil
+                    return (context, value)
+                case .failure(let error):
+                    failures.append((index, status, error))
+                    if !Loader.isTimeout(error) { cycleHadFastFailure = true }
+                    if failures.count == urls.count { break loop }
+                    if inFlight == 0, next < urls.count { launchNext() }
+                }
+            }
+        }
+
+        if failures.isEmpty { throw CancellationError() }
+        failures.sort { $0.index < $1.index }
+        let legs = failures.map { LegStatus(index: $0.index, status: $0.status) }
+        lastFailureSummary = failures.map {
+            "\(Loader.legName($0.index))=\(Loader.hostPort(urls[$0.index])): \(Loader.shortError($0.error, status: $0.status))"
+        }.joined(separator: "; ")
+        let message = failures.last.map { Loader.redactUserinfo("\($0.error)") } ?? "All API URLs failed"
         let underlying = QuonfigLoaderError.allURLsFailed(message)
-        // Auth class (R1): the primary answered 401/403/404/410 and no leg
-        // answered 2xx or 304 (a 2xx that failed to decode, or a 304 with no
-        // cached body, still proves the key was accepted).
-        if let primary = legs.first, primary.index == 0, Loader.isAuthClass(primary.status),
-            !legs.contains(where: { (200..<300).contains($0.status) || $0.status == 304 })
-        {
+        let accepted = legs.contains { (200..<300).contains($0.status) || $0.status == 304 }
+        // Every configured leg answered auth-class: the init decides
+        // "unauthorized" only on this (decision D1).
+        let everyLeg = !accepted && legs.count == urls.count && legs.allSatisfy { Loader.isAuthClass($0.status) }
+        // Auth class for the poller (R1): the primary answered 401/403/404/410
+        // and no leg answered 2xx or 304 (a 2xx that failed to decode, or a 304
+        // with no cached body, still proves the key was accepted).
+        if let primary = legs.first, primary.index == 0, Loader.isAuthClass(primary.status), !accepted {
             throw AuthRejectedError(
-                status: primary.status, host: Loader.hostPort(apiURLs[0]), legs: legs,
-                underlying: underlying)
+                status: primary.status, host: Loader.hostPort(urls[0]), legs: legs,
+                everyLegRejected: everyLeg, underlying: underlying)
         }
         throw underlying
+    }
+
+    /// One leg as an event, so the hedged cycle can race it.
+    private func fetchLeg(index: Int, apiURL: URL, context: QuonfigContext) async -> LegEvent {
+        var status = 0
+        do {
+            let result = try await fetch(from: apiURL, context: context, status: &status)
+            return .done(index: index, status: status, result: .success(result))
+        } catch {
+            return .done(index: index, status: status, result: .failure(error))
+        }
+    }
+
+    /// Whether a leg ended on a transport timeout (a hang), as opposed to a
+    /// fast error such as a refusal or an HTTP status.
+    static func isTimeout(_ error: Error) -> Bool {
+        (error as? URLError)?.code == .timedOut
+    }
+
+    /// Strips `user:pass@` userinfo from every URL in `text` (decision D4: a
+    /// raw transport error can embed the failing URL).
+    static func redactUserinfo(_ text: String) -> String {
+        text.replacingOccurrences(
+            of: "://[^/@\\s]+@", with: "://", options: .regularExpression)
     }
 
     /// `primary`, `secondary`, then `url3`, `url4`, ... for the log lines.

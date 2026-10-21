@@ -79,9 +79,10 @@ Notes:
 - **Startup failure.** With no network answer and no cached copy,
   `onInitFailure` decides what happens at the timeout:
   - `.fail` (the default): `initialize` throws `QuonfigInitError.timeout`
-    (first fetch still hanging), `.unavailable` (every attempt failed) or
-    `.unauthorized` (the SDK key was rejected; thrown at once). No client is
-    returned, so nothing keeps running.
+    (the last attempt hung), `.unavailable` (the last attempt failed fast,
+    e.g. refused or an HTTP error) or `.unauthorized` (every API URL rejected
+    the SDK key; thrown at once). No client is returned, so nothing keeps
+    running.
   - `.wait`: keep waiting and retrying, with no upper bound.
   - `.continue` (alias `.continueWithDefaults`): return, serving your
     caller-supplied defaults. `isReady` stays `false` and `source` is
@@ -94,6 +95,12 @@ Notes:
   if q.source == .defaults { /* running on code defaults */ }
   await q.waitForReady()  // suspends until a config (network or cache) is applied
   ```
+
+  Each attempt is a hedged fetch: the secondary API URL fires 2s after the
+  primary (at once if the primary fails fast), and the first answer wins, so
+  one hung API host does not exhaust `initTimeout`. An `initTimeout` of `0`
+  or less runs exactly one attempt and then applies `onInitFailure`; it never
+  means "no deadline" (`.infinity` does).
 
   `source` is `.network`, `.cache` or `.defaults`. Log lines are prefixed
   `[quonfig]`, name the API hosts and never the SDK key.

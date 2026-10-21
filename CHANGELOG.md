@@ -24,10 +24,22 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 
 - **The default startup-failure mode is `.fail` (qfg-9p4i.11).** When
   `initTimeout` (default 5s) passes with no network config and no cached copy,
-  `initialize` throws `QuonfigInitError.timeout` (the first fetch is still
-  hanging) or `.unavailable` (every attempt failed). A rejected SDK key
-  (401/403/404/410 from the primary, no URL accepting it) throws
-  `.unauthorized` at once instead of waiting out the timeout. No client is
+  `initialize` throws `QuonfigInitError.timeout` (the last attempt hung: no
+  API URL in it failed fast, or none completed) or `.unavailable` (the last
+  attempt failed fast on at least one URL). A rejected SDK key
+  (401/403/404/410 from EVERY API URL) throws `.unauthorized` at once instead
+  of waiting out the timeout; a rejection from the primary alone is an
+  ordinary failed attempt (qfg-9p4i.17.8).
+- **Each fetch is a hedged primary+secondary request (qfg-9p4i.17.8).** The
+  secondary fires 2s after the primary (at once if the primary fails fast),
+  the first 2xx/304 wins and the other leg is cancelled. A hung primary used
+  to hold the sequential failover for the 10s request timeout, past the 5s
+  `initTimeout`, so a first launch with no cache threw while the secondary
+  was healthy.
+- **`initTimeout <= 0` (or NaN) runs exactly one attempt** and then applies
+  `onInitFailure` (qfg-9p4i.17.8). It used to decide at once, before any
+  attempt.
+- **The loader's `allURLsFailed` message strips URL userinfo** (`user:pass@`). No client is
   returned, so no poll loop or telemetry keeps running.
 - **`initialize` retries before the timeout.** It retries the first fetch with
   jittered backoff (0.5s, 1s, 2s, ... capped at 30s) instead of making one

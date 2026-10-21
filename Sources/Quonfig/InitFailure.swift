@@ -49,8 +49,10 @@ enum InitRetry {
     }
 }
 
-/// `5s`, `0.2s`, or `none` for an unbounded timeout (the configured value).
+/// `5s`, `0.2s`, `none` for an unbounded timeout, or `0s` for a value `<= 0`
+/// or NaN (one attempt, decision D3).
 func formatTimeoutSetting(_ t: TimeInterval) -> String {
+    guard t > 0 else { return "0s" }
     guard t.isFinite else { return "none" }
     if t == t.rounded() { return "\(Int(t))s" }
     return "\(t)s"
@@ -133,10 +135,10 @@ final class InitState: @unchecked Sendable {
 /// How the init wait ended.
 enum InitOutcome: Sendable, Equatable {
     case loaded
-    /// `initTimeout` passed. `everFailed`: at least one attempt failed (versus
-    /// the first attempt still hanging).
-    case timedOut(everFailed: Bool)
-    /// The primary rejected the SDK key (401/403/404/410) and no leg accepted it.
+    /// `initTimeout` passed (or the one attempt of `initTimeout <= 0` ended).
+    /// `hung`: the last attempt hung (no leg failed fast) or none completed.
+    case timedOut(hung: Bool)
+    /// Every API URL rejected the SDK key (401/403/404/410).
     case unauthorized(status: Int, host: String)
 }
 
@@ -146,14 +148,10 @@ final class InitRace: @unchecked Sendable {
     private let lock = NSLock()
     private var _outcome: InitOutcome?
     private var _pastTimeout = false
-    private var _everFailed = false
     let gate = ResumeOnce()
 
     var outcome: InitOutcome? { lock.locked { _outcome } }
     var pastTimeout: Bool { lock.locked { _pastTimeout } }
-    var everFailed: Bool { lock.locked { _everFailed } }
-
-    func recordFailure() { lock.locked { _everFailed = true } }
     func markPastTimeout() { lock.locked { _pastTimeout = true } }
 
     func finish(_ outcome: InitOutcome) {
