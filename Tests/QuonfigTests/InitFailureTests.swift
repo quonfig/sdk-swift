@@ -129,7 +129,7 @@ final class InitFailureTests: XCTestCase {
         persistence: Persistence? = nil,
         initTimeout: TimeInterval = 0.3,
         logs: CapturingLogSink? = nil,
-        backoff: TimeInterval = 0.01,
+        backoff: @escaping @Sendable (Int) -> TimeInterval = { _ in 0.01 },
         now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     ) async throws -> Quonfig {
         let cfg = config(logs: logs)
@@ -140,14 +140,20 @@ final class InitFailureTests: XCTestCase {
                 configuration: cfg, context: ctx, loader: loader(client, cfg),
                 persistence: persistence, aggregator: nil, lifecycleProvider: provider,
                 onInitFailure: mode, initTimeout: initTimeout, fingerprint: defaultContextFingerprint,
-                initRetryBackoff: { _ in backoff }, now: now)
+                initRetryBackoff: backoff, now: now)
         }
         return try await Quonfig.make(
             configuration: cfg, context: ctx, loader: loader(client, cfg),
             persistence: persistence, aggregator: nil, lifecycleProvider: provider,
             initTimeout: initTimeout, fingerprint: defaultContextFingerprint,
-            initRetryBackoff: { _ in backoff }, now: now)
+            initRetryBackoff: backoff, now: now)
     }
+
+    /// A backoff long enough that no new attempt starts before the deadline,
+    /// so a test asserting `.unavailable` sees the deadline land in the sleep
+    /// after a fast failure (an attempt still in flight counts as hung, D2).
+    /// Not slow: `.fail` cancels the sleep when it throws.
+    static let sleepThroughDeadline: @Sendable (Int) -> TimeInterval = { _ in 30 }
 
     func expectInitError(
         _ expected: QuonfigInitError, file: StaticString = #filePath, line: UInt = #line,
@@ -166,7 +172,7 @@ final class InitFailureTests: XCTestCase {
     func testFailLogsErrorWithHostsAndOptions() async throws {
         let logs = CapturingLogSink()
         await expectInitError(.unavailable) {
-            try await make(ScriptedClient { _ in .offline }, logs: logs, backoff: 0.2)
+            try await make(ScriptedClient { _ in .offline }, logs: logs, backoff: InitFailureTests.sleepThroughDeadline)
         }
         XCTAssertEqual(
             logs.count(.error, "^\\[quonfig\\] init FAILED: no config after .*onInitFailure=wait"), 1, "\(logs.all)")
@@ -398,7 +404,7 @@ final class InitFailureTests: XCTestCase {
 
     func twoLegMake(
         _ client: HTTPClient, mode: OnInitFailure = .fail, initTimeout: TimeInterval,
-        logs: CapturingLogSink? = nil, backoff: TimeInterval = 0.01
+        logs: CapturingLogSink? = nil, backoff: @escaping @Sendable (Int) -> TimeInterval = { _ in 0.01 }
     ) async throws -> Quonfig {
         let cfg = Configuration(
             sdkKey: "qf_ck_test",
@@ -410,7 +416,7 @@ final class InitFailureTests: XCTestCase {
             persistence: Persistence(store: InMemoryFallbackStore()), aggregator: nil,
             lifecycleProvider: QuonfigClientTests.ManualLifecycleProvider(center: NotificationCenter()),
             onInitFailure: mode, initTimeout: initTimeout, fingerprint: defaultContextFingerprint,
-            initRetryBackoff: { _ in backoff })
+            initRetryBackoff: backoff)
     }
 
     /// (a) A HUNG primary must not keep the secondary from being tried before
@@ -476,7 +482,7 @@ final class InitFailureTests: XCTestCase {
         await expectInitError(.unavailable) {
             try await twoLegMake(
                 LegClient(primary: { _ in .status(401) }, secondary: { _ in .status(503) }), initTimeout: 0.3,
-                backoff: 0.2)
+                backoff: InitFailureTests.sleepThroughDeadline)
         }
     }
 
@@ -502,7 +508,8 @@ final class InitFailureTests: XCTestCase {
     func testHangThenFastFailureIsUnavailable() async throws {
         await expectInitError(.unavailable) {
             try await make(
-                ScriptedClient { n in n == 1 ? .timeoutAfter(seconds: 0.1) : .offline }, initTimeout: 0.4, backoff: 0.2)
+                ScriptedClient { n in n == 1 ? .timeoutAfter(seconds: 0.1) : .offline }, initTimeout: 1,
+                backoff: { n in n == 1 ? 0.01 : 30 })
         }
     }
 
