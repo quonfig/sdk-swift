@@ -4,7 +4,7 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 `Sources/Quonfig/Version.swift`; a `vX.Y.Z` tag is the release (see
 `RELEASING.md`).
 
-## Unreleased
+## 0.5.0 - 2026-10-21
 
 `initialize` now fails by default when there is no config at all
 (qfg-9p4i.11, minor). New `onInitFailure: .fail | .wait | .continue`, a
