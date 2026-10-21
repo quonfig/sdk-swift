@@ -9,9 +9,8 @@ import XCTest
 /// (sdk-go `ordering_guard_test.go`, sdk-node `shouldInstall`) at the Store
 /// install point — the single `apply` every load path funnels through.
 ///
-/// Swift v1 stays POLL-ONLY with sequential failover (the parallel hedge is
-/// deferred to v1.x per project/plans/sdk-ios.md §3.3), but the guard matters
-/// even without the hedge: a sequential failover to a lagging (equal-or-lower
+/// Swift stays POLL-ONLY, and each poll is a hedged primary/secondary fetch
+/// (qfg-9p4i.17.8). A hedge or failover to a lagging (equal-or-lower
 /// generation, spec 5f.1) secondary would otherwise regress an established
 /// client. The fixtures below use gen=1 as the stale leg.
 final class OrderingGuardTests: XCTestCase {

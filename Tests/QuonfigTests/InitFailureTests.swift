@@ -19,6 +19,10 @@ final class InitFailureTests: XCTestCase {
             case hang
             /// Answers 200 after `seconds`, unless the calling task is cancelled.
             case slowOK(Data, seconds: TimeInterval)
+            /// Fails fast-style (offline) after `seconds`.
+            case slowFail(seconds: TimeInterval)
+            /// Ends on a transport timeout after `seconds` (a hung leg).
+            case timeoutAfter(seconds: TimeInterval)
         }
         private let lock = NSLock()
         private var _count = 0
@@ -46,6 +50,12 @@ final class InitFailureTests: XCTestCase {
             case .slowOK(let body, let seconds):
                 try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
                 return (body, HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: [:])!)
+            case .slowFail(let seconds):
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw URLError(.notConnectedToInternet)
+            case .timeoutAfter(let seconds):
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw URLError(.timedOut)
             }
         }
     }
@@ -119,6 +129,7 @@ final class InitFailureTests: XCTestCase {
         persistence: Persistence? = nil,
         initTimeout: TimeInterval = 0.3,
         logs: CapturingLogSink? = nil,
+        backoff: @escaping @Sendable (Int) -> TimeInterval = { _ in 0.01 },
         now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     ) async throws -> Quonfig {
         let cfg = config(logs: logs)
@@ -129,14 +140,20 @@ final class InitFailureTests: XCTestCase {
                 configuration: cfg, context: ctx, loader: loader(client, cfg),
                 persistence: persistence, aggregator: nil, lifecycleProvider: provider,
                 onInitFailure: mode, initTimeout: initTimeout, fingerprint: defaultContextFingerprint,
-                initRetryBackoff: { _ in 0.01 }, now: now)
+                initRetryBackoff: backoff, now: now)
         }
         return try await Quonfig.make(
             configuration: cfg, context: ctx, loader: loader(client, cfg),
             persistence: persistence, aggregator: nil, lifecycleProvider: provider,
             initTimeout: initTimeout, fingerprint: defaultContextFingerprint,
-            initRetryBackoff: { _ in 0.01 }, now: now)
+            initRetryBackoff: backoff, now: now)
     }
+
+    /// A backoff long enough that no new attempt starts before the deadline,
+    /// so a test asserting `.unavailable` sees the deadline land in the sleep
+    /// after a fast failure (an attempt still in flight counts as hung, D2).
+    /// Not slow: `.fail` cancels the sleep when it throws.
+    static let sleepThroughDeadline: @Sendable (Int) -> TimeInterval = { _ in 30 }
 
     func expectInitError(
         _ expected: QuonfigInitError, file: StaticString = #filePath, line: UInt = #line,
@@ -155,7 +172,7 @@ final class InitFailureTests: XCTestCase {
     func testFailLogsErrorWithHostsAndOptions() async throws {
         let logs = CapturingLogSink()
         await expectInitError(.unavailable) {
-            try await make(ScriptedClient { _ in .offline }, logs: logs)
+            try await make(ScriptedClient { _ in .offline }, logs: logs, backoff: InitFailureTests.sleepThroughDeadline)
         }
         XCTAssertEqual(
             logs.count(.error, "^\\[quonfig\\] init FAILED: no config after .*onInitFailure=wait"), 1, "\(logs.all)")
@@ -355,6 +372,212 @@ final class InitFailureTests: XCTestCase {
         let client = ScriptedClient { n in n < 4 ? .status(403) : .ok(InitFailureTests.body) }
         let q = try await make(client, mode: .wait, initTimeout: 0.05)
         XCTAssertEqual(client.count, 4)
+        XCTAssertEqual(q.source, .network)
+        await q.shutdown()
+    }
+
+    // MARK: qfg-9p4i.17.8 conformance (decisions D1-D3)
+
+    /// Routes each request by host: `primary` / `secondary` pick the step
+    /// from that leg's own 1-based call count.
+    final class LegClient: HTTPClient, @unchecked Sendable {
+        typealias Step = ScriptedClient.Step
+        private let lock = NSLock()
+        private var counts: [String: Int] = [:]
+        private let primary: @Sendable (Int) -> Step
+        private let secondary: @Sendable (Int) -> Step
+        init(primary: @escaping @Sendable (Int) -> Step, secondary: @escaping @Sendable (Int) -> Step) {
+            self.primary = primary
+            self.secondary = secondary
+        }
+        func count(_ host: String) -> Int { lock.locked { counts[host] ?? 0 } }
+        func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+            let host = request.url!.host!
+            let step: Step = lock.locked {
+                counts[host, default: 0] += 1
+                let n = counts[host]!
+                return host.hasPrefix("primary") ? primary(n) : secondary(n)
+            }
+            return try await ScriptedClient { _ in step }.data(for: request)
+        }
+    }
+
+    func twoLegMake(
+        _ client: HTTPClient, mode: OnInitFailure = .fail, initTimeout: TimeInterval,
+        logs: CapturingLogSink? = nil, backoff: @escaping @Sendable (Int) -> TimeInterval = { _ in 0.01 }
+    ) async throws -> Quonfig {
+        let cfg = Configuration(
+            sdkKey: "qf_ck_test",
+            apiURLs: [URL(string: "https://primary.quonfig.com")!, URL(string: "https://secondary.quonfig.com")!],
+            telemetryURL: URL(string: "https://telemetry.quonfig.com")!,
+            pollInterval: 0, collectEvaluationSummaries: false, logSink: logs)
+        return try await Quonfig.make(
+            configuration: cfg, context: ctx, loader: loader(client, cfg),
+            persistence: Persistence(store: InMemoryFallbackStore()), aggregator: nil,
+            lifecycleProvider: QuonfigClientTests.ManualLifecycleProvider(center: NotificationCenter()),
+            onInitFailure: mode, initTimeout: initTimeout, fingerprint: defaultContextFingerprint,
+            initRetryBackoff: backoff)
+    }
+
+    /// (a) A HUNG primary must not keep the secondary from being tried before
+    /// the init deadline: the attempt is a hedged primary+secondary fetch, so
+    /// a first launch with no cache starts on the secondary's config.
+    func testHungPrimaryIsHedgedToSecondaryBeforeInitTimeout() async throws {
+        let client = LegClient(primary: { _ in .hang }, secondary: { _ in .ok(InitFailureTests.body) })
+        let started = Date()
+        let q = try await twoLegMake(client, initTimeout: 5)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 4, "the secondary fires at the hedge delay")
+        XCTAssertEqual(q.source, .network)
+        XCTAssertEqual(q.string("greeting", default: "code"), "live")
+        XCTAssertEqual(client.count("secondary.quonfig.com"), 1)
+        await q.shutdown()
+    }
+
+    func twoLegLoader(_ client: HTTPClient, hedgeDelay: TimeInterval) async -> Loader {
+        let l = Loader(
+            sdkKey: "k", context: ctx,
+            apiURLs: [URL(string: "https://primary.quonfig.com")!, URL(string: "https://secondary.quonfig.com")!],
+            client: client)
+        await l.setHedgeDelay(hedgeDelay)
+        return l
+    }
+
+    /// A primary that answers inside the hedge delay: the secondary is never
+    /// contacted.
+    func testHedgeDoesNotFireSecondaryWhenPrimaryAnswersInTime() async throws {
+        let client = LegClient(
+            primary: { _ in .slowOK(InitFailureTests.body, seconds: 0.02) },
+            secondary: { _ in .ok(InitFailureTests.body) })
+        let l = await twoLegLoader(client, hedgeDelay: 0.5)
+        _ = try await l.load()
+        XCTAssertEqual(client.count("secondary.quonfig.com"), 0)
+    }
+
+    /// A fast primary error fires the secondary at once (no hedge wait).
+    func testFastPrimaryErrorFiresSecondaryImmediately() async throws {
+        let client = LegClient(primary: { _ in .status(503) }, secondary: { _ in .ok(InitFailureTests.body) })
+        let l = await twoLegLoader(client, hedgeDelay: 10)
+        let started = Date()
+        _ = try await l.load()
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1)
+    }
+
+    /// The first success wins; the slower primary leg is cancelled.
+    func testHedgedSecondaryWinsAndPrimaryIsCancelled() async throws {
+        let client = LegClient(
+            primary: { _ in .slowOK(InitFailureTests.body, seconds: 5) }, secondary: { _ in .ok(InitFailureTests.body) }
+        )
+        let l = await twoLegLoader(client, hedgeDelay: 0.05)
+        let started = Date()
+        _ = try await l.load()
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1)
+        XCTAssertEqual(client.count("primary.quonfig.com"), 1)
+        XCTAssertEqual(client.count("secondary.quonfig.com"), 1)
+    }
+
+    /// D1: a primary 401 while the secondary answers 503 is NOT unauthorized
+    /// (only every leg answering auth-class is). The init waits out the
+    /// timeout and reports unavailable.
+    func testPrimaryAuthWithSecondaryErrorIsNotUnauthorized() async throws {
+        await expectInitError(.unavailable) {
+            try await twoLegMake(
+                LegClient(primary: { _ in .status(401) }, secondary: { _ in .status(503) }), initTimeout: 0.3,
+                backoff: InitFailureTests.sleepThroughDeadline)
+        }
+    }
+
+    /// D1: every leg auth-class (401 + 410) decides unauthorized at once.
+    func testAllLegsAuthClassIsUnauthorizedImmediately() async throws {
+        let started = Date()
+        await expectInitError(.unauthorized) {
+            try await twoLegMake(
+                LegClient(primary: { _ in .status(401) }, secondary: { _ in .status(410) }), initTimeout: 5)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1)
+    }
+
+    /// D2: the reason follows the LAST attempt. Attempt 1 fails fast, then
+    /// the next attempt hangs through the deadline: timeout, not unavailable.
+    func testFastFailureThenHangIsTimeout() async throws {
+        await expectInitError(.timeout) {
+            try await make(ScriptedClient { n in n == 1 ? .offline : .hang }, initTimeout: 0.3)
+        }
+    }
+
+    /// D2: a hang first, then fast failures on the last attempt: unavailable.
+    func testHangThenFastFailureIsUnavailable() async throws {
+        await expectInitError(.unavailable) {
+            try await make(
+                ScriptedClient { n in n == 1 ? .timeoutAfter(seconds: 0.1) : .offline }, initTimeout: 1,
+                backoff: { n in n == 1 ? 0.01 : 30 })
+        }
+    }
+
+    /// D2: every attempt ended on a transport timeout: timeout.
+    func testEveryAttemptTimingOutIsTimeout() async throws {
+        await expectInitError(.timeout) {
+            try await make(ScriptedClient { _ in .timeoutAfter(seconds: 0.05) }, initTimeout: 0.3)
+        }
+    }
+
+    /// D4: the loader's aggregate error never carries URL userinfo, even when
+    /// the raw transport error embeds the failing URL.
+    func testLoaderErrorRedactsURLUserinfo() async throws {
+        final class EchoURLClient: HTTPClient, @unchecked Sendable {
+            func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+                throw URLError(
+                    .cannotConnectToHost,
+                    userInfo: [NSURLErrorFailingURLStringErrorKey: request.url!.absoluteString])
+            }
+        }
+        let l = Loader(
+            sdkKey: "k", context: ctx, apiURLs: [URL(string: "https://alice:s3cret@primary.quonfig.com")!],
+            client: EchoURLClient())
+        do {
+            _ = try await l.load()
+            XCTFail("expected failure")
+        } catch let QuonfigLoaderError.allURLsFailed(msg) {
+            XCTAssertFalse(msg.contains("s3cret"), msg)
+            XCTAssertFalse(msg.contains("alice:"), msg)
+            XCTAssertTrue(msg.contains("primary.quonfig.com"), msg)
+        }
+        let summary = await l.lastFailureSummary ?? ""
+        XCTAssertFalse(summary.contains("s3cret"), summary)
+    }
+
+    /// D3: initTimeout 0 runs exactly one attempt before deciding; a config
+    /// that arrives in that attempt is used.
+    func testZeroInitTimeoutRunsOneAttemptThatCanSucceed() async throws {
+        let q = try await make(ScriptedClient { _ in .slowOK(InitFailureTests.body, seconds: 0.1) }, initTimeout: 0)
+        XCTAssertEqual(q.source, .network)
+        XCTAssertEqual(q.string("greeting", default: "code"), "live")
+        await q.shutdown()
+    }
+
+    /// D3: initTimeout 0 under fail: exactly one attempt, then the policy.
+    func testZeroInitTimeoutFailRunsExactlyOneAttempt() async throws {
+        let client = ScriptedClient { _ in .offline }
+        await expectInitError(.unavailable) { try await make(client, initTimeout: 0) }
+        XCTAssertEqual(client.count, 1)
+    }
+
+    /// D3: a negative or NaN initTimeout behaves like 0 (never a crash, never
+    /// "no deadline"); continue starts on defaults after the one attempt.
+    func testNegativeAndNaNInitTimeoutRunOneAttemptThenContinue() async throws {
+        for t in [-1, TimeInterval.nan] {
+            let client = ScriptedClient { _ in .slowFail(seconds: 0.05) }
+            let q = try await make(client, mode: .continue, initTimeout: t)
+            XCTAssertGreaterThanOrEqual(client.count, 1, "decided before any attempt finished (initTimeout=\(t))")
+            XCTAssertEqual(q.source, .defaults)
+            await q.shutdown()
+        }
+    }
+
+    /// D3: under wait, initTimeout 0 keeps retrying after the one attempt.
+    func testZeroInitTimeoutWaitKeepsRetrying() async throws {
+        let client = ScriptedClient { n in n < 3 ? .offline : .ok(InitFailureTests.body) }
+        let q = try await make(client, mode: .wait, initTimeout: 0)
+        XCTAssertEqual(client.count, 3)
         XCTAssertEqual(q.source, .network)
         await q.shutdown()
     }
