@@ -4,6 +4,15 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 `Sources/Quonfig/Version.swift`; a `vX.Y.Z` tag is the release (see
 `RELEASING.md`).
 
+## Unreleased
+
+- Fix (patch): the telemetry POST deadline no longer waits for URLSession to
+  finish cancelling a hung request. `flushOnBackground(networkBudgetSeconds:)`
+  returns at its budget (0.3s by default) instead of after the cancelled POST
+  unwinds, which took 7-10s on a loaded iOS Simulator and could outlast the
+  few seconds of background time iOS grants. The window stays on disk for the
+  next launch, as before (qfg-k3ke).
+
 ## 0.5.0 - 2026-10-21
 
 `initialize` now fails by default when there is no config at all
