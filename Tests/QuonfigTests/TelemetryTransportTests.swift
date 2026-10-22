@@ -186,6 +186,24 @@ final class CapturingLogSink: QuonfigLogSink, @unchecked Sendable {
 
 // MARK: - Tests
 
+/// An `HTTPClient` that ignores task cancellation and answers only after
+/// `seconds`, standing in for a URLSession that is slow to unwind a cancelled
+/// request (a loaded iOS Simulator took 7-10s, qfg-k3ke).
+final class CancellationDeafClient: HTTPClient, @unchecked Sendable {
+    let seconds: TimeInterval
+    init(seconds: TimeInterval) { self.seconds = seconds }
+
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        let seconds = self.seconds
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { cont.resume() }
+        }
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+        return (Data("{}".utf8), response)
+    }
+}
+
 final class TelemetryTransportTests: XCTestCase {
     private var dir: URL!
     private var clock: ManualClock!
@@ -596,6 +614,26 @@ final class TelemetryTransportTests: XCTestCase {
     }
 
     // MARK: P1: a hung POST is aborted at the timeout and retained (compressed)
+
+    /// P1 deadline is the uploader's own: `send` returns at `timeout` even
+    /// when the HTTP client is slow to honor cancellation. Racing in a task
+    /// group joined the cancelled POST, so a background flush overran its
+    /// 0.3s budget by however long URLSession took to unwind (qfg-k3ke).
+    func testSendReturnsAtDeadlineWhenClientIgnoresCancellation() async {
+        let uploader = TelemetryUploader(
+            postURL: URL(string: "https://telemetry.quonfig-localhost/api/v1/telemetry/")!,
+            sdkKey: "qf_ck_test", userAgent: "Quonfig-Swift/test",
+            client: CancellationDeafClient(seconds: 10))
+        let started = Date()
+        do {
+            _ = try await uploader.send(Data("{}".utf8), timeout: 0.3)
+            XCTFail("expected a timeout")
+        } catch TelemetryTransportError.timeout {
+        } catch {
+            XCTFail("expected TelemetryTransportError.timeout, got \(error)")
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5, "send must not wait for the cancelled POST")
+    }
 
     func testTimeoutAbortsAndRetains() async {
         stub.script([.init(hang: true)], then: .init(status: 200))

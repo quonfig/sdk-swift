@@ -156,6 +156,11 @@ public final class TelemetryUploader: Sendable {
     /// an idle timeout) and no separate connect-timeout knob, so the deadline is
     /// a race against a sleep that cancels the request; it bounds connect, TLS
     /// and the response together.
+    ///
+    /// The race resumes on whichever side finishes first and cancels the other
+    /// without waiting for it. A task group would join the cancelled POST, so
+    /// `send` would return only once URLSession finished unwinding it (7-10s on
+    /// a loaded iOS Simulator), past the background flush budget (qfg-k3ke).
     func send(_ body: Data, timeout: TimeInterval) async throws -> TelemetryPostResult {
         var request = URLRequest(url: postURL)
         request.httpMethod = "POST"
@@ -170,17 +175,27 @@ public final class TelemetryUploader: Sendable {
         let client = self.client
         let finalRequest = request
         let deadline = sleepNanoseconds(timeout)
-        return try await withThrowingTaskGroup(of: TelemetryPostResult.self) { group in
-            group.addTask {
-                try await TelemetryUploader.perform(finalRequest, client: client)
+        let race = SendRace()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { cont in
+                let post = Task {
+                    do {
+                        race.finish(.success(try await TelemetryUploader.perform(finalRequest, client: client)))
+                    } catch {
+                        race.finish(.failure(error))
+                    }
+                }
+                let timer = Task {
+                    try? await Task.sleep(nanoseconds: deadline)
+                    race.finish(.failure(TelemetryTransportError.timeout))
+                }
+                race.install(cont) {
+                    post.cancel()
+                    timer.cancel()
+                }
             }
-            group.addTask {
-                try await Task.sleep(nanoseconds: deadline)
-                throw TelemetryTransportError.timeout
-            }
-            defer { group.cancelAll() }
-            guard let first = try await group.next() else { throw TelemetryTransportError.aborted }
-            return first
+        } onCancel: {
+            race.finish(.failure(TelemetryTransportError.aborted))
         }
     }
 
@@ -211,5 +226,43 @@ public final class TelemetryUploader: Sendable {
             retryAfter: http.value(forHTTPHeaderField: "Retry-After"),
             bodySnippet: snippet
         )
+    }
+}
+
+/// One-shot outcome of `TelemetryUploader.send`'s POST-vs-deadline race. The
+/// first `finish` wins: it resumes the continuation and cancels both racers.
+/// Either side may finish before the continuation is installed.
+private final class SendRace: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<TelemetryPostResult, Error>?
+    private var cont: CheckedContinuation<TelemetryPostResult, Error>?
+    private var cancelRacers: (() -> Void)?
+
+    func install(_ cont: CheckedContinuation<TelemetryPostResult, Error>, cancelRacers: @escaping () -> Void) {
+        let done: Result<TelemetryPostResult, Error>? = lock.locked {
+            if let result { return result }
+            self.cont = cont
+            self.cancelRacers = cancelRacers
+            return nil
+        }
+        if let done {
+            cont.resume(with: done)
+            cancelRacers()
+        }
+    }
+
+    func finish(_ outcome: Result<TelemetryPostResult, Error>) {
+        let (cont, cancelRacers) = lock.locked {
+            () -> (CheckedContinuation<TelemetryPostResult, Error>?, (() -> Void)?) in
+            guard result == nil else { return (nil, nil) }
+            result = outcome
+            defer {
+                self.cont = nil
+                self.cancelRacers = nil
+            }
+            return (self.cont, self.cancelRacers)
+        }
+        cont?.resume(with: outcome)
+        cancelRacers?()
     }
 }
