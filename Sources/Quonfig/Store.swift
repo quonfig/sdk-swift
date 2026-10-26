@@ -1,5 +1,4 @@
 import Foundation
-import os
 
 /// A native, typed config value coerced from the wire `WireValue`.
 ///
@@ -32,6 +31,10 @@ public struct EvaluationDetails: Sendable, Equatable {
     public let variant: String
     public let configId: String?
     public let configType: String?
+    /// Why the read returned no value, when `reason` is `.error` (OpenFeature
+    /// error codes). `nil` on a successful read. A wrong-type or malformed value
+    /// is `.typeMismatch` (qfg-zvyy).
+    public let errorCode: EvaluationErrorCode?
 
     public init(
         value: QuonfigValue?,
@@ -40,7 +43,8 @@ public struct EvaluationDetails: Sendable, Equatable {
         weightedValueIndex: Int?,
         variant: String,
         configId: String?,
-        configType: String?
+        configType: String?,
+        errorCode: EvaluationErrorCode? = nil
     ) {
         self.value = value
         self.reason = reason
@@ -49,7 +53,48 @@ public struct EvaluationDetails: Sendable, Equatable {
         self.variant = variant
         self.configId = configId
         self.configType = configType
+        self.errorCode = errorCode
     }
+}
+
+/// The OpenFeature error code carried by `EvaluationDetails.errorCode` when a
+/// read returns no value.
+public enum EvaluationErrorCode: String, Sendable, Equatable {
+    /// The stored value is not of the requested type, or is malformed (for
+    /// example an int config holding `"twelve"`, or `3.9` read as an int).
+    case typeMismatch = "TYPE_MISMATCH"
+    /// The key is not in the resolved config.
+    case flagNotFound = "FLAG_NOT_FOUND"
+    /// No config has been loaded yet.
+    case providerNotReady = "PROVIDER_NOT_READY"
+}
+
+/// The value type a typed read asks for (`Quonfig.details(_:as:)`).
+public enum QuonfigValueType: String, Sendable, Equatable, CaseIterable {
+    case bool
+    case int
+    case double
+    case string
+    case stringList = "string_list"
+    case duration
+    case json
+}
+
+/// The largest integer a double holds exactly (2^53 - 1). An int read of a
+/// stored double succeeds only within +/- this bound (qfg-zvyy).
+let maxSafeInteger: Double = 9_007_199_254_740_991
+
+/// A double as an `Int64` only when it is finite, whole and within
+/// +/-(2^53 - 1). Never truncates and never traps.
+func safeWholeInt(_ d: Double) -> Int64? {
+    guard d.isFinite, d == d.rounded(.towardZero), abs(d) <= maxSafeInteger else { return nil }
+    return Int64(d)
+}
+
+/// Why a typed read returned no value. The message names the types, never the
+/// stored value.
+struct TypedReadFailure: Error {
+    let message: String
 }
 
 /// Build the OpenFeature `variant` string per the cross-SDK spec
@@ -150,9 +195,10 @@ public actor Store {
     /// disabled via `Configuration.collectEvaluationSummaries`).
     private let exposureBox = ExposureRecorderBox()
 
-    /// Keys already warned about for a malformed duration value (one warning per
-    /// key per client, qfg-2agi.14). Lock-guarded; touched off-actor by reads.
-    private let invalidDurationWarnings = WarnOnceBox()
+    /// Keys already warned about for a failed read (one WARN per key per client,
+    /// qfg-zvyy; generalizes the qfg-2agi.14 malformed-duration warning).
+    /// Lock-guarded; touched off-actor by reads.
+    private let readFailures: ReadFailureWarnings
 
     /// Active subscribers, keyed by token id so cancellation is O(1).
     private var subscribers: [UInt64: @Sendable () -> Void] = [:]
@@ -173,7 +219,14 @@ public actor Store {
     /// context is discarded by `applyIfCurrent`.
     private var contextTag: String?
 
-    public init() {}
+    public init() {
+        readFailures = ReadFailureWarnings(sink: OSLogSink())
+    }
+
+    /// A store whose failed-read WARNs go to `logSink` (`OSLogSink` when nil).
+    init(logSink: QuonfigLogSink?) {
+        readFailures = ReadFailureWarnings(sink: logSink ?? OSLogSink())
+    }
 
     // MARK: - Mutation (actor-isolated)
 
@@ -400,36 +453,29 @@ public actor Store {
         snapshotBox.value.ready
     }
 
-    /// Whether a flag is enabled. Returns `false` for any non-`true` value or an
-    /// absent key (matches `sdk-javascript`'s `isEnabled`: `=== true`).
+    /// Whether a flag is enabled: `true` only for a stored bool `true`. Never
+    /// throws. A missing key or a non-bool value returns `false` and logs one
+    /// WARN per key (qfg-zvyy); a stored `false` does not log.
     public nonisolated func isEnabled(_ key: String) -> Bool {
-        if case .bool(let b)? = resolved(key)?.coerced { return b }
-        return false
+        isEnabled(key, logExposure: true)
     }
 
-    /// String value, or the caller-supplied default if absent / wrong type.
+    /// String value (string and log_level configs), or the caller-supplied
+    /// default if absent / wrong type.
     public nonisolated func string(_ key: String, default def: String) -> String {
-        if case .string(let s)? = resolved(key)?.coerced { return s }
-        return def
+        string(key, default: def, logExposure: true)
     }
 
-    /// Int value, or the caller-supplied default. Coerces a whole `double` to
-    /// `int` for forgiveness, matching the family's lenient numeric reads.
+    /// Int value, or the caller-supplied default. A double config reads as an
+    /// int only when it is whole and within +/-(2^53 - 1); `3.9`, `1e300` and
+    /// NaN return the default (never truncated).
     public nonisolated func int(_ key: String, default def: Int) -> Int {
-        switch resolved(key)?.coerced {
-        case .int(let i)?: return Int(i)
-        case .double(let d)?: return Int(exactly: d) ?? def
-        default: return def
-        }
+        int(key, default: def, logExposure: true)
     }
 
     /// Double value, or the caller-supplied default. An `int` widens to `double`.
     public nonisolated func double(_ key: String, default def: Double) -> Double {
-        switch resolved(key)?.coerced {
-        case .double(let d)?: return d
-        case .int(let i)?: return Double(i)
-        default: return def
-        }
+        double(key, default: def, logExposure: true)
     }
 
     /// String-list value, or the caller-supplied default if absent / wrong type.
@@ -441,40 +487,59 @@ public actor Store {
     ///
     /// Only a `duration` config whose stored value is inside the shared ISO-8601
     /// grammar (`PT30S`, `P1DT6H`, `PT1.5S`, ...; see `parseISODurationMillis`)
-    /// yields a value. Absent, wrong type, or malformed -> the default; a
-    /// malformed value also logs one warning per key.
+    /// yields a value. Absent, wrong type, or malformed -> the default; a wrong
+    /// type or malformed value also logs one warning per key.
     public nonisolated func duration(_ key: String, default def: TimeInterval) -> TimeInterval {
         duration(key, default: def, logExposure: true)
     }
 
-    /// JSON object value as a Foundation dictionary, or `nil` if absent / not an
-    /// object. Mirrors `sdk-javascript`'s `json(key) -> object | undefined`.
+    /// JSON object value as a Foundation dictionary, or `nil` if absent / not a
+    /// json config / not an object. Mirrors `sdk-javascript`'s
+    /// `json(key) -> object | undefined`.
     public nonisolated func json(_ key: String) -> [String: Any]? {
-        guard case .json(let v)? = resolved(key)?.coerced else { return nil }
-        guard case .object = v else { return nil }
+        guard case .json(let v)? = readTyped(key, as: .json, logExposure: true) else { return nil }
+        guard case .object = v else {
+            readFailures.warnOnce(key, reason: "json value is not an object")
+            return nil
+        }
         return v.foundationValue as? [String: Any]
     }
 
     /// Full resolution details (value + reason + ruleIndex + variant) for a key.
     /// Returns `.error` reason when the store isn't ready or the key is absent,
-    /// exactly as `sdk-javascript`'s `getDetails`.
+    /// exactly as `sdk-javascript`'s `getDetails`. A value that does not fit
+    /// its own config type (a malformed int, a duration outside the grammar) is
+    /// `.error` with `errorCode == .typeMismatch` and no value.
     public nonisolated func details(_ key: String) -> EvaluationDetails {
         let snap = snapshotBox.value
-        guard snap.ready else {
-            return EvaluationDetails(
-                value: nil, reason: .error, ruleIndex: nil, weightedValueIndex: nil,
-                variant: "default", configId: nil, configType: nil)
-        }
-        guard let ev = snap.evaluations[key] else {
-            return EvaluationDetails(
-                value: nil, reason: .error, ruleIndex: nil, weightedValueIndex: nil,
-                variant: "default", configId: nil, configType: nil)
-        }
+        guard snap.ready else { return errorDetails(nil, .providerNotReady) }
+        guard let ev = snap.evaluations[key] else { return errorDetails(nil, .flagNotFound) }
         let value = coerce(ev.value)
         // Older api-delivery builds omit `reason` on the wire; absence -> STATIC
-        // (matches sdk-javascript getDetails fallback). A malformed duration is
-        // an ERROR (qfg-2agi.14).
-        let reason = (ev.value.type == "duration" && value == nil) ? .error : (ev.reason ?? .static)
+        // (matches sdk-javascript getDetails fallback).
+        guard value != nil else { return errorDetails(ev, .typeMismatch) }
+        return successDetails(ev, value: value)
+    }
+
+    /// Typed resolution details: the value read as `type` under the same rules
+    /// as the typed getters. A wrong-type, malformed or unconvertible value
+    /// returns `reason == .error`, `errorCode == .typeMismatch` and no value,
+    /// and logs one WARN per key (qfg-zvyy). Does not record an exposure.
+    public nonisolated func details(_ key: String, as type: QuonfigValueType) -> EvaluationDetails {
+        let snap = snapshotBox.value
+        guard snap.ready else { return errorDetails(nil, .providerNotReady) }
+        guard let ev = snap.evaluations[key] else { return errorDetails(nil, .flagNotFound) }
+        switch typedValue(ev.value, as: type) {
+        case .success(let value):
+            return successDetails(ev, value: value)
+        case .failure(let failure):
+            readFailures.warnOnce(key, reason: failure.message)
+            return errorDetails(ev, .typeMismatch)
+        }
+    }
+
+    private nonisolated func successDetails(_ ev: Evaluation, value: QuonfigValue?) -> EvaluationDetails {
+        let reason = ev.reason ?? .static
         return EvaluationDetails(
             value: value,
             reason: reason,
@@ -487,61 +552,168 @@ public actor Store {
             configType: ev.configType)
     }
 
+    private nonisolated func errorDetails(_ ev: Evaluation?, _ code: EvaluationErrorCode) -> EvaluationDetails {
+        EvaluationDetails(
+            value: nil, reason: .error, ruleIndex: nil, weightedValueIndex: nil,
+            variant: "default", configId: ev?.configId, configType: ev?.configType,
+            errorCode: code)
+    }
+
     // MARK: - Exposure-decoupled read variants
     //
     // The `…ExposureLoggingDisabled` analog (plan §2.10 Statsig §7.6). The getter
     // shape is baked in NOW so debug screens / admin tooling can read a flag
     // without it counting as an exposure for the telemetry aggregator (qfg-2t2d.8
-    // wires the aggregator into the EXPOSED path). Today both paths return the
-    // same value; the only difference is the suppressed exposure log, which is
-    // why these forward through `resolved(key, logExposure: false)`.
+    // wires the aggregator into the EXPOSED path). Both paths return the same
+    // value; the only difference is the suppressed exposure log.
 
-    /// `isEnabled` without recording an exposure.
+    /// `isEnabled` without recording an exposure (when `logExposure` is false).
     public nonisolated func isEnabled(_ key: String, logExposure: Bool) -> Bool {
-        if case .bool(let b)? = resolved(key, logExposure: logExposure)?.coerced { return b }
-        return false
+        guard snapshotBox.value.ready else { return false }
+        guard let r = resolved(key, logExposure: logExposure) else {
+            readFailures.warnOnce(key, reason: "no config with this key")
+            return false
+        }
+        switch typedValue(r.evaluation.value, as: .bool) {
+        case .success(.bool(let b)):
+            return b
+        case .success:
+            return false
+        case .failure(let failure):
+            readFailures.warnOnce(key, reason: failure.message)
+            return false
+        }
     }
 
-    /// `string` without recording an exposure.
+    /// `string` without recording an exposure (when `logExposure` is false).
     public nonisolated func string(_ key: String, default def: String, logExposure: Bool) -> String {
-        if case .string(let s)? = resolved(key, logExposure: logExposure)?.coerced { return s }
+        if case .string(let s)? = readTyped(key, as: .string, logExposure: logExposure) { return s }
         return def
     }
 
-    /// `int` without recording an exposure.
+    /// `int` without recording an exposure (when `logExposure` is false).
     public nonisolated func int(_ key: String, default def: Int, logExposure: Bool) -> Int {
-        switch resolved(key, logExposure: logExposure)?.coerced {
-        case .int(let i)?: return Int(i)
-        case .double(let d)?: return Int(exactly: d) ?? def
-        default: return def
+        if case .int(let i)? = readTyped(key, as: .int, logExposure: logExposure) {
+            // Int(exactly:) so a 32-bit Int can never trap; typedValue already
+            // checked the range on 64-bit platforms.
+            return Int(exactly: i) ?? def
         }
+        return def
     }
 
-    /// `double` without recording an exposure.
+    /// `double` without recording an exposure (when `logExposure` is false).
     public nonisolated func double(_ key: String, default def: Double, logExposure: Bool) -> Double {
-        switch resolved(key, logExposure: logExposure)?.coerced {
-        case .double(let d)?: return d
-        case .int(let i)?: return Double(i)
-        default: return def
-        }
+        if case .double(let d)? = readTyped(key, as: .double, logExposure: logExposure) { return d }
+        return def
     }
 
     /// `stringList` without recording an exposure (when `logExposure` is false).
     public nonisolated func stringList(_ key: String, default def: [String], logExposure: Bool) -> [String] {
-        if case .stringList(let l)? = resolved(key, logExposure: logExposure)?.coerced { return l }
+        if case .stringList(let l)? = readTyped(key, as: .stringList, logExposure: logExposure) { return l }
         return def
     }
 
     /// `duration` without recording an exposure (when `logExposure` is false).
     public nonisolated func duration(_ key: String, default def: TimeInterval, logExposure: Bool) -> TimeInterval {
-        guard let r = resolved(key, logExposure: logExposure), r.evaluation.value.type == "duration" else {
-            return def
-        }
-        if case .string(let s)? = r.coerced, let millis = parseISODurationMillis(s) {
+        if case .string(let s)? = readTyped(key, as: .duration, logExposure: logExposure),
+            let millis = parseISODurationMillis(s)
+        {
             return TimeInterval(millis) / 1000
         }
-        invalidDurationWarnings.warnOnce(key)
         return def
+    }
+
+    // MARK: - Typed reads (qfg-zvyy)
+
+    /// The typed-getter contract shared by every getter: the value read as
+    /// `type`, or `nil`. `nil` for a missing key or a not-ready store (not
+    /// logged), or for a wrong-type / malformed value (logged once per key).
+    private nonisolated func readTyped(_ key: String, as type: QuonfigValueType, logExposure: Bool) -> QuonfigValue? {
+        guard let r = resolved(key, logExposure: logExposure) else { return nil }
+        switch typedValue(r.evaluation.value, as: type) {
+        case .success(let value):
+            return value
+        case .failure(let failure):
+            readFailures.warnOnce(key, reason: failure.message)
+            return nil
+        }
+    }
+
+    /// Read a wire value as `type`. No string coercion: a stored `"false"`,
+    /// `"3"` or `"PT1S"` is a string to every other getter. int <-> double
+    /// converts only when exact. Mirrors sdk-go v2 `typed_read.go`.
+    nonisolated func typedValue(_ wire: WireValue, as type: QuonfigValueType) -> Result<QuonfigValue, TypedReadFailure>
+    {
+        let v = wire.value ?? .null
+        func mismatch() -> Result<QuonfigValue, TypedReadFailure> {
+            .failure(TypedReadFailure(message: "config has type \(wire.type), expected \(type.rawValue)"))
+        }
+        func malformed() -> Result<QuonfigValue, TypedReadFailure> {
+            .failure(TypedReadFailure(message: "config has a malformed \(wire.type) value"))
+        }
+        switch type {
+        case .bool:
+            guard wire.type == "bool" else { return mismatch() }
+            if case .bool(let b) = v { return .success(.bool(b)) }
+            return malformed()
+        case .string:
+            guard wire.type == "string" || wire.type == "log_level" else { return mismatch() }
+            if case .string(let s) = v { return .success(.string(s)) }
+            return malformed()
+        case .int:
+            switch wire.type {
+            case "int":
+                if case .int(let i) = v { return .success(.int(i)) }
+                if case .double(let d) = v, let i = safeWholeInt(d) { return .success(.int(i)) }
+                return malformed()
+            case "double":
+                guard let d = doubleOf(v) else { return malformed() }
+                guard let i = safeWholeInt(d) else { return mismatch() }
+                return .success(.int(i))
+            default:
+                return mismatch()
+            }
+        case .double:
+            switch wire.type {
+            case "double":
+                guard let d = doubleOf(v) else { return malformed() }
+                return .success(.double(d))
+            case "int":
+                if case .int(let i) = v { return .success(.double(Double(i))) }
+                if case .double(let d) = v, let i = safeWholeInt(d) { return .success(.double(Double(i))) }
+                return malformed()
+            default:
+                return mismatch()
+            }
+        case .stringList:
+            guard wire.type == "string_list" else { return mismatch() }
+            if case .array(let arr) = v {
+                let strings = arr.compactMap { item -> String? in
+                    if case .string(let s) = item { return s }
+                    return nil
+                }
+                if strings.count == arr.count { return .success(.stringList(strings)) }
+            }
+            return malformed()
+        case .duration:
+            guard wire.type == "duration" else { return mismatch() }
+            if case .string(let s) = v, parseISODurationMillis(s) != nil { return .success(.string(s)) }
+            return malformed()
+        case .json:
+            guard wire.type == "json" else { return mismatch() }
+            // sdk-javascript rejects stringified JSON loudly; native only.
+            if case .string = v { return malformed() }
+            if case .null = v { return malformed() }
+            return .success(.json(v))
+        }
+    }
+
+    private nonisolated func doubleOf(_ v: QuonfigJSONValue) -> Double? {
+        switch v {
+        case .double(let d): return d
+        case .int(let i): return Double(i)
+        default: return nil
+        }
     }
 
     // MARK: - Internal coercion
@@ -563,7 +735,7 @@ public actor Store {
         // qfg-2t2d.8: an EXPOSED read records one exposure. The recorder fans to
         // the aggregator actor via a detached Task, so this never blocks the read.
         if logExposure, let recorder = exposureBox.recorder {
-            let reason = (ev.value.type == "duration" && coerced == nil) ? .error : (ev.reason ?? .static)
+            let reason = coerced == nil ? .error : (ev.reason ?? .static)
             let details = EvaluationDetails(
                 value: coerced,
                 reason: reason,
@@ -588,46 +760,27 @@ public actor Store {
         exposureBox.recorder = recorder
     }
 
-    /// Coerce a wire `{ type, value }` into a native `QuonfigValue`, mirroring
-    /// `sdk-javascript/src/config.ts` `parseValue` for the frontend types the
-    /// eval endpoint serves (bool/int/double/string/json/string_list).
+    /// Coerce a wire `{ type, value }` into a native `QuonfigValue` of its own
+    /// config type, mirroring `sdk-javascript/src/config.ts` `parseValue` for
+    /// the frontend types the eval endpoint serves. A value that does not fit
+    /// its own type (a malformed int, a duration outside the grammar) is `nil`,
+    /// so `details` reports an error and never surfaces the raw value. An
+    /// unknown type tag is carried as raw json (forward compatibility).
     private nonisolated func coerce(_ wire: WireValue) -> QuonfigValue? {
         guard let v = wire.value else { return .null }
+        let own: QuonfigValueType?
         switch wire.type {
-        case "bool":
-            if case .bool(let b) = v { return .bool(b) }
-        case "int":
-            if case .int(let i) = v { return .int(i) }
-            if case .double(let d) = v, let i = Int64(exactly: d) { return .int(i) }
-        case "double":
-            if case .double(let d) = v { return .double(d) }
-            if case .int(let i) = v { return .double(Double(i)) }
-        case "string", "log_level":
-            if case .string(let s) = v { return .string(s) }
-        case "duration":
-            // The stored ISO-8601 string, only when it is inside the grammar
-            // (qfg-2agi.14). A malformed or non-string duration coerces to nil,
-            // so no getter or details() ever surfaces the raw value.
-            if case .string(let s) = v, parseISODurationMillis(s) != nil { return .string(s) }
-            return nil
-        case "string_list":
-            if case .array(let arr) = v {
-                let strings = arr.compactMap { item -> String? in
-                    if case .string(let s) = item { return s }
-                    return nil
-                }
-                if strings.count == arr.count { return .stringList(strings) }
-            }
-        case "json":
-            // sdk-javascript rejects stringified JSON loudly; native only.
-            if case .string = v { return nil }
-            return .json(v)
-        default:
-            break
+        case "bool": own = .bool
+        case "int": own = .int
+        case "double": own = .double
+        case "string", "log_level": own = .string
+        case "duration": own = .duration
+        case "string_list": own = .stringList
+        case "json": own = .json
+        default: own = nil
         }
-        // Type/shape mismatch — fall back to carrying the raw graph as json so a
-        // forgiving caller can still inspect it, rather than dropping silently.
-        return .json(v)
+        guard let own else { return .json(v) }
+        return try? typedValue(wire, as: own).get()
     }
 }
 
@@ -709,20 +862,26 @@ private final class ExposureRecorderBox: @unchecked Sendable {
     }
 }
 
-/// Lock-guarded "warn once per key" set for malformed duration values. The raw
-/// value is never logged, only the key.
-private final class WarnOnceBox: @unchecked Sendable {
+/// Lock-guarded "warn once per key" set for failed reads (qfg-zvyy). One WARN
+/// per key per client, whatever the cause. The stored value is never logged,
+/// only the key and the reason.
+final class ReadFailureWarnings: @unchecked Sendable {
     private let lock = NSLock()
     private var warned: Set<String> = []
-    private let logger = os.Logger(subsystem: "com.quonfig.sdk", category: "Quonfig")
+    private let sink: QuonfigLogSink
 
-    func warnOnce(_ key: String) {
+    init(sink: QuonfigLogSink) {
+        self.sink = sink
+    }
+
+    func warnOnce(_ key: String, reason: String) {
         lock.lock()
         let isNew = warned.insert(key).inserted
         lock.unlock()
         if isNew {
-            logger.warning(
-                "Quonfig: config \(key, privacy: .public) has a malformed duration value; returning the default")
+            sink.emit(
+                level: .warn,
+                message: "[quonfig] read of \"\(key)\" returned no value; the caller's default applies: \(reason)")
         }
     }
 }

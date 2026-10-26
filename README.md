@@ -58,6 +58,7 @@ let cfg   = quonfig.json("pricing")                           // [String: Any]?
 let hosts = quonfig.stringList("allowed-hosts", default: [])  // [String]
 let wait  = quonfig.duration("request-timeout", default: 30)  // TimeInterval (seconds), from ISO-8601 e.g. "PT1.5S"
 let detail = quonfig.details("new-checkout")                  // value + reason + variant
+let typed  = quonfig.details("rate-limit", as: .int)          // + errorCode .typeMismatch on a wrong type
 
 // React to live updates (SwiftUI-friendly — diff-before-notify, so unchanged
 // polls don't churn). Hold the returned token; dropping it unsubscribes.
@@ -68,6 +69,36 @@ try await quonfig.updateContext(
     QuonfigContext(["user": ["key": .string("u_456")]])
 )
 ```
+
+### Typed getters
+
+Every Quonfig SDK follows the same typed-getter contract (qfg-zvyy). A getter
+returns a value only when the stored config has the getter's type:
+
+| Getter | Reads | Otherwise |
+|---|---|---|
+| `isEnabled(key)` | a bool config holding `true` | `false` |
+| `string(key, default:)` | string and log_level configs | `default` |
+| `int(key, default:)` | int configs; double configs only when whole and within +/-(2^53 - 1) (`3.0` -> `3`) | `default` |
+| `double(key, default:)` | double and int configs (`30` -> `30.0`) | `default` |
+| `stringList(key, default:)` | string_list configs | `default` |
+| `duration(key, default:)` | duration configs inside the ISO-8601 grammar | `default` |
+| `json(key)` | json configs holding an object | `nil` |
+| `details(key, as:)` | the same rules | `reason == .error`, `errorCode == .typeMismatch`, no value |
+
+- **No string coercion.** A stored `"false"` is a string, never a bool; `"3"` is
+  never an int; `"PT1S"` is never a duration.
+- **Numbers never truncate.** `int` on a stored `3.9`, `1e300` or NaN returns
+  your default.
+- **One WARN per key.** A wrong-type or malformed read logs one WARN per key per
+  client through `Configuration.logSink` (the key and the types, never the
+  value). `isEnabled` also logs once per key when the key is missing. A missing
+  key read through any other getter is not logged, and nothing is logged before
+  the first config arrives.
+- **Never throws, never traps.** Every getter is non-throwing.
+- Missing ENV_VAR values and decryption failures are resolved by Quonfig
+  delivery, which leaves the key out of a frontend envelope, so you get your
+  default.
 
 Notes:
 
