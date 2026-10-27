@@ -1,11 +1,19 @@
 import Foundation
 
-/// In-memory key for a counter: `{flagKey, configType}` (JS keys its map by
-/// `"${config.key},${configType}"`). We keep the two parts structured rather than
+/// In-memory key for a counter: `{flagKey, configType}` plus the evaluated
+/// value's identity (configId, reason, rule/weighted index, selectedValue). JS
+/// keys its map by `"${config.key},${configType}" + SEP + JSON(counter)`, so a
+/// flag whose value or rule changes inside one window gets one counter per
+/// evaluated value (qfg-koqy). We keep the parts structured rather than
 /// string-joined so we never have to split on a comma a key might contain.
 private struct CounterKey: Hashable, Sendable {
     let key: String
     let type: String
+    let configId: String?
+    let reason: String
+    let ruleIndex: Int?
+    let weightedValueIndex: Int?
+    let selectedValue: QuonfigJSONValue
 }
 
 /// Resolved telemetry transport settings (policy P1-P5 in
@@ -183,23 +191,28 @@ public actor SummaryAggregator {
     /// Record one exposure for `details` (the store calls this from the EXPOSED
     /// read path only). Never blocks reads — the store hops onto this actor with a
     /// detached, non-awaited `Task` (see `Store` wiring). Mirrors JS `record`:
-    /// first sight of a `{key,type}` creates the counter (with `selectedValue`),
+    /// first sight of a `{key,type}` + evaluated value creates the counter,
     /// every sight increments its count.
     public func record(key: String, details: EvaluationDetails) {
         guard !disabled else { return }
-        let ck = CounterKey(key: key, type: details.configType ?? "")
+        let type = details.configType ?? ""
+        let selected = Self.selectedValue(for: details.value, configType: type)
+        let ck = CounterKey(
+            key: key, type: type, configId: details.configId, reason: details.reason.rawValue,
+            ruleIndex: details.ruleIndex, weightedValueIndex: details.weightedValueIndex,
+            selectedValue: selected)
 
         if counters[ck] == nil {
-            // Bound distinct keys (JS: drop once the map hits maxKeys).
+            // Bound distinct counters (JS: drop once the map hits maxKeys).
             if counters.count >= maxKeys { return }
             counters[ck] = EvaluationCounter(
                 configRowIndex: nil,
                 conditionalValueIndex: nil,
-                configId: details.configId,
-                reason: details.reason.rawValue,
-                ruleIndex: details.ruleIndex,
-                weightedValueIndex: details.weightedValueIndex,
-                selectedValue: Self.selectedValue(for: details.value, configType: details.configType ?? ""),
+                configId: ck.configId,
+                reason: ck.reason,
+                ruleIndex: ck.ruleIndex,
+                weightedValueIndex: ck.weightedValueIndex,
+                selectedValue: selected,
                 count: 0
             )
         }
@@ -567,8 +580,17 @@ public actor SummaryAggregator {
             windowStart = now()
             return nil
         }
-        let summaries = counters.map { entry -> EvaluationSummary in
-            EvaluationSummary(key: entry.key.key, type: entry.key.type, counters: [entry.value])
+        // One summary per {key,type}, holding a counter per evaluated value.
+        struct SummaryKey: Hashable { let key: String; let type: String }
+        var grouped: [SummaryKey: [EvaluationCounter]] = [:]
+        var order: [SummaryKey] = []
+        for (ck, counter) in counters {
+            let sk = SummaryKey(key: ck.key, type: ck.type)
+            if grouped[sk] == nil { order.append(sk) }
+            grouped[sk, default: []].append(counter)
+        }
+        let summaries = order.map { sk in
+            EvaluationSummary(key: sk.key, type: sk.type, counters: grouped[sk] ?? [])
         }
         let result = EvaluationSummaries(
             start: Int64(windowStart.timeIntervalSince1970 * 1000),
