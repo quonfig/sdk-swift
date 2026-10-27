@@ -147,6 +147,43 @@ final class TelemetryTests: XCTestCase {
         XCTAssertEqual(selected["bool"] as? Bool, true)  // { [valueType]: value }
     }
 
+    /// A flag whose value/rule changes inside one window gets one counter per
+    /// evaluated value under a single `{key,type}` summary, not every hit folded
+    /// into the first value seen (qfg-koqy; JS/Go/Ruby parity).
+    func testCountersKeyedPerEvaluatedValue() async throws {
+        let client = MockClient()
+        let agg = SummaryAggregator(
+            uploader: makeUploader(client), instanceHash: "ih", queueStore: MemoryQueueStore())
+
+        for _ in 0..<2 {
+            await agg.record(
+                key: "new-checkout",
+                details: details(.bool(true), reason: .targetingMatch, configType: "feature_flag", ruleIndex: 1))
+        }
+        await agg.record(
+            key: "new-checkout",
+            details: details(.bool(false), reason: .targetingMatch, configType: "feature_flag", ruleIndex: 0))
+        await agg.flush()
+
+        XCTAssertEqual(client.bodies.count, 1)
+        let json = try JSONSerialization.jsonObject(with: client.bodies[0]) as! [String: Any]
+        let events = json["events"] as! [[String: Any]]
+        let list = (events[0]["summaries"] as! [String: Any])["summaries"] as! [[String: Any]]
+        XCTAssertEqual(list.count, 1, "one summary per {key,type}")
+        XCTAssertEqual(list[0]["key"] as? String, "new-checkout")
+        XCTAssertEqual(list[0]["type"] as? String, "feature_flag")
+        let counters = list[0]["counters"] as! [[String: Any]]
+        XCTAssertEqual(counters.count, 2, "one counter per evaluated value")
+        let byValue = Dictionary(
+            uniqueKeysWithValues: counters.map { c in
+                ((c["selectedValue"] as! [String: Any])["bool"] as! Bool, c)
+            })
+        XCTAssertEqual(byValue[true]?["count"] as? Int, 2)
+        XCTAssertEqual(byValue[true]?["ruleIndex"] as? Int, 1)
+        XCTAssertEqual(byValue[false]?["count"] as? Int, 1)
+        XCTAssertEqual(byValue[false]?["ruleIndex"] as? Int, 0)
+    }
+
     func testSelectedValueShapes() {
         func obj(_ v: QuonfigValue, _ t: String) -> [String: QuonfigJSONValue]? {
             if case .object(let o) = SummaryAggregator.selectedValue(for: v, configType: t) { return o }

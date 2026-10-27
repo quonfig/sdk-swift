@@ -6,6 +6,11 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 
 ## Unreleased
 
+- Fix (patch): evaluation-summary telemetry now keeps one counter per
+  evaluated value under each `{key, type}` summary. Before, every evaluation
+  in a window was counted under the first value/rule seen, so a flag whose
+  value changed mid-window reported the wrong per-value counts. Matches
+  sdk-javascript, sdk-go and sdk-ruby (qfg-koqy).
 - Fix (patch): the telemetry POST deadline no longer waits for URLSession to
   finish cancelling a hung request. `flushOnBackground(networkBudgetSeconds:)`
   returns at its budget (0.3s by default) instead of after the cancelled POST
