@@ -4,7 +4,7 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 `Sources/Quonfig/Version.swift`; a `vX.Y.Z` tag is the release (see
 `RELEASING.md`).
 
-## 0.6.0 - unreleased
+## 0.6.0 - 2026-10-27
 
 The typed-getter contract (qfg-zvyy), shared by every Quonfig SDK (the backend
 SDKs pin it with the integration-test-data `getter.contract.*` matrix; this
