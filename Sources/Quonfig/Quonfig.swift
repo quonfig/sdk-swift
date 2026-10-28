@@ -211,7 +211,7 @@ public final class Quonfig: @unchecked Sendable {
         initRetryBackoff: @escaping @Sendable (Int) -> TimeInterval = { InitRetry.backoff(attempt: $0) },
         now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     ) async throws -> Quonfig {
-        let store = Store()
+        let store = Store(logSink: configuration.logSink)
         let log: QuonfigLogSink = configuration.logSink ?? OSLogSink()
         let initState = InitState(now: now, log: log)
 
@@ -570,7 +570,9 @@ public final class Quonfig: @unchecked Sendable {
         if let waiter { await store.removeReadyWaiter(waiter) }
     }
 
-    /// Whether a flag is enabled (`value === true`; `false` otherwise).
+    /// Whether a flag is enabled: `true` only for a stored bool `true`. Never
+    /// throws; a missing key or non-bool value returns `false` and logs one WARN
+    /// per key.
     public func isEnabled(_ key: String, logExposure: Bool = true) -> Bool {
         store.isEnabled(key, logExposure: logExposure)
     }
@@ -580,7 +582,8 @@ public final class Quonfig: @unchecked Sendable {
         store.string(key, default: def, logExposure: logExposure)
     }
 
-    /// Int value, or the caller-supplied default. Whole doubles coerce to int.
+    /// Int value, or the caller-supplied default. A double reads as an int only
+    /// when it is whole and within +/-(2^53 - 1); it is never truncated.
     public func int(_ key: String, default def: Int, logExposure: Bool = true) -> Int {
         store.int(key, default: def, logExposure: logExposure)
     }
@@ -610,6 +613,13 @@ public final class Quonfig: @unchecked Sendable {
     /// Full resolution details (value + reason + ruleIndex + variant) for a key.
     public func details(_ key: String) -> EvaluationDetails {
         store.details(key)
+    }
+
+    /// Typed resolution details: the value read as `type` under the typed
+    /// getters' rules. A wrong-type or malformed value returns
+    /// `reason == .error`, `errorCode == .typeMismatch` and no value.
+    public func details(_ key: String, as type: QuonfigValueType) -> EvaluationDetails {
+        store.details(key, as: type)
     }
 
     // MARK: - Subscribe

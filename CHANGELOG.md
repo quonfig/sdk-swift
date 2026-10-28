@@ -4,7 +4,56 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 `Sources/Quonfig/Version.swift`; a `vX.Y.Z` tag is the release (see
 `RELEASING.md`).
 
-## Unreleased
+## 0.6.0 - 2026-10-27
+
+The typed-getter contract (qfg-zvyy), shared by every Quonfig SDK (the backend
+SDKs pin it with the integration-test-data `getter.contract.*` matrix; this
+SDK ports that matrix into `TypedGetterContractTests`). A typed read that
+cannot return a value of the getter's type returns your default, and logs it.
+
+> **UPGRADE (minor, pre-1.0 behavior change):** no API is removed and no call
+> site needs to change. What can change is the value you read:
+>
+> 1. **`string(...)` reads only string and log_level configs.** It used to
+>    return the ISO-8601 text of a duration config (`"PT30S"`); it now returns
+>    your default. Read durations with `duration(...)`.
+> 2. **`int(...)` on a double reads only exact, safe values.** A whole double
+>    above 2^53 - 1 (for example `9007199254740992`) used to read as an int; it
+>    now returns your default, like `3.9`, `1e300` and NaN. `int` never
+>    truncates. `double(...)` on an int config still works (`30` -> `30.0`).
+> 3. **`json(...)` reads only json configs.** A config of another type (for
+>    example an unresolved `provided` value) used to come back as its raw
+>    object; it now returns `nil`.
+> 4. **`details(key)` on a malformed value** (an int config holding
+>    `"twelve"`) returns `reason == .error`, `errorCode == .typeMismatch` and
+>    no value. It used to return the raw value with the wire reason.
+> 5. **One WARN per key.** A wrong-type or malformed read, and `isEnabled` on a
+>    missing key, log one WARN per key per client through
+>    `Configuration.logSink` (the key and the types, never the value). The
+>    malformed-duration warning now goes through `logSink` too, instead of
+>    straight to `os.Logger`.
+
+### Added
+
+- `details(_:as:)` on `Quonfig` and `Store`: typed resolution details under the
+  typed getters' rules. A wrong-type or malformed value returns
+  `reason == .error` and `errorCode == .typeMismatch`.
+- `EvaluationDetails.errorCode` (`EvaluationErrorCode`: `.typeMismatch`,
+  `.flagNotFound`, `.providerNotReady`). `nil` on a successful read. The
+  `EvaluationDetails` initializer takes it as a trailing parameter that
+  defaults to `nil`.
+- `QuonfigValueType`, the type a typed read asks for.
+
+### Changed
+
+- The typed getters follow the cross-SDK contract: no string coercion, safe
+  int <-> double conversions only, and the caller's default on any wrong-type
+  or malformed value. `isEnabled` is `true` only for a stored bool `true` and
+  never throws.
+- `details(key)` sets `errorCode` (`.providerNotReady` before the first config,
+  `.flagNotFound` for a missing key, `.typeMismatch` for a malformed value).
+
+### Fixed
 
 - Fix (patch): evaluation-summary telemetry now keeps one counter per
   evaluated value under each `{key, type}` summary. Before, every evaluation
