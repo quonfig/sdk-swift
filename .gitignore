@@ -4,4 +4,6 @@
 *.xcworkspace
 .DS_Store
 xcuserdata/
-Package.resolved
+# Package.resolved is committed, not ignored: sdk-swift has no remote dependencies today, but if
+# one is added its lockfile must be in git so ssdlc / deps can scan it (qfg-66ko.19). SwiftPM
+# ignores a dependency's Package.resolved, so this does not affect apps that use the SDK.
