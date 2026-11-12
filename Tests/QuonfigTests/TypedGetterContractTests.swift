@@ -227,6 +227,9 @@ final class TypedGetterContractTests: XCTestCase {
     func testSuccessfulReadsDoNotLog() async throws {
         let logs = CapturingLogSink()
         let q = try await makeClient(logs: logs)
+        // Baseline after init: the single-URL test config logs the one-time
+        // failover WARN at construction, which is not a read.
+        let initWarns = logs.count(.warn)
         _ = q.isEnabled("c.bool")
         _ = q.isEnabled("c.bool.false")
         _ = q.string("c.string", default: "d")
@@ -236,7 +239,7 @@ final class TypedGetterContractTests: XCTestCase {
         _ = q.stringList("c.string_list", default: [])
         _ = q.duration("c.duration", default: 0)
         _ = q.json("c.json")
-        XCTAssertEqual(logs.count(.warn), 0, logs.all.joined(separator: "\n"))
+        XCTAssertEqual(logs.count(.warn) - initWarns, 0, logs.all.joined(separator: "\n"))
     }
 
     func testMissingKeyTypedReadIsNotLogged() async throws {
