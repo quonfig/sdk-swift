@@ -215,6 +215,18 @@ public final class Quonfig: @unchecked Sendable {
         let log: QuonfigLogSink = configuration.logSink ?? OSLogSink()
         let initState = InitState(now: now, log: log)
 
+        // A single explicit API URL disables automatic failover: the default
+        // (and every `domain`-derived) URL list carries both a primary and a
+        // secondary leg, and the SDK fails over between them. `apiURLs`
+        // replaces that list wholesale, so a one-entry override silently drops
+        // the secondary. Warn once at init (mirrors sdk-go).
+        if let explicit = configuration.apiURLs, explicit.count < 2 {
+            log.emit(
+                level: .warn,
+                message: "[quonfig] explicit apiURLs disables automatic failover to the secondary;"
+                    + " pass both primary and secondary URLs to keep it")
+        }
+
         // Wire telemetry (the only client-side telemetry component is the
         // evaluation-summary aggregator — context shapes/examples are server-side
         // via collectContextMode, §2.8). Disabled when the toggle is off / nil.

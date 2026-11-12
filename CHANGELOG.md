@@ -4,6 +4,17 @@ All notable changes to the Quonfig Swift SDK. The version lives in
 `Sources/Quonfig/Version.swift`; a `vX.Y.Z` tag is the release (see
 `RELEASING.md`).
 
+## 0.7.0 - 2026-11-12
+
+- **Single-URL failover warning** (qfg-ea56y). Passing `apiURLs` with one
+  entry replaces the default primary + secondary list, which turns off
+  automatic failover. The SDK now logs a one-time WARN at init when that
+  happens: `explicit apiURLs disables automatic failover to the secondary;
+  pass both primary and secondary URLs to keep it`. Every other Quonfig SDK
+  already warns this way. Log-only: no API or behavior changes.
+- **Docs:** the frontend SDK key prefix is `qf_pk_`, not `qf_ck_`, in the
+  README and doc comments.
+
 ## 0.6.0 - 2026-10-27
 
 The typed-getter contract (qfg-zvyy), shared by every Quonfig SDK (the backend
