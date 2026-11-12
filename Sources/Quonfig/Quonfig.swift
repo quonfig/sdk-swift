@@ -100,9 +100,9 @@ public final class Quonfig: @unchecked Sendable {
     /// Mirrors the §2.4 sketch:
     /// ```swift
     /// let quonfig = try await Quonfig.initialize(
-    ///     sdkKey: "qf_ck_…",
+    ///     sdkKey: "qf_pk_…",
     ///     context: QuonfigContext(["user": ["key": .string("u_123")]]),
-    ///     options: .init(sdkKey: "qf_ck_…", domain: "quonfig.com")
+    ///     options: .init(sdkKey: "qf_pk_…", domain: "quonfig.com")
     /// )
     /// ```
     ///
