@@ -18,7 +18,7 @@ public enum CollectContextMode: String, Sendable {
 /// `process.env`/`QUONFIG_DOMAIN` runtime lookup on-device (§4.8). Env vars
 /// only meaningfully exist in tests/CI.
 public struct Configuration: Sendable {
-    /// The client/frontend SDK key (`qf_ck_…`). Sent as HTTP Basic with
+    /// The client/frontend SDK key (`qf_pk_…`). Sent as HTTP Basic with
     /// username `"u"` (see `Auth.swift`).
     public var sdkKey: String
 

@@ -45,7 +45,7 @@ let quonfig = try await Quonfig.initialize(
         "user": ["key": .string("u_123"), "email": .string("a@b.com")],
     ]),
     options: .init(
-        sdkKey: "qf_ck_production_…",     // client/frontend key (see note below)
+        sdkKey: "qf_pk_production_…",     // client/frontend key (see note below)
         domain: "quonfig.com"             // or .apiURLs(...) escape hatch
     )
 )
@@ -205,7 +205,7 @@ How uploads behave (the Quonfig SDK telemetry transport policy, mobile column):
 
 ```swift
 let options = Configuration(
-    sdkKey: "qf_ck_production_…",
+    sdkKey: "qf_pk_production_…",
     telemetryFlushInterval: 60,        // seconds
     telemetryTimeout: 15,              // seconds, foreground POST deadline
     telemetryMaxRetainedBatches: 5,
@@ -320,7 +320,7 @@ pattern). It drives the full public surface — `initialize` → getters →
 ```bash
 cd test-swift
 swift run TestSwiftApp          # fixture mode (default)
-QUONFIG_SDK_KEY=qf_ck_… swift run TestSwiftApp   # live mode
+QUONFIG_SDK_KEY=qf_pk_… swift run TestSwiftApp   # live mode
 ```
 
 The package also contains `FlagListView` (SwiftUI) for hosting in an iOS/macOS
